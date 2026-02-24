@@ -1,0 +1,34 @@
+# Python cache/venv
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Large model artifacts and generated outputs
+models/
+**/models/
+**/hf/
+**/hub/
+**/xet/
+output/
+**/output/
+voicesource/
+**/voicesource/
+
+# Audio/video artifacts
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.mp4
+*.mkv
+*.webm
+
+# Logs
+*.log
