@@ -17,6 +17,7 @@ RUN python3 -m pip install --upgrade pip && python3 -m pip install -r /app/requi
 COPY main.py /app/main.py
 COPY test_client.py /app/test_client.py
 COPY get_model.py /app/get_model.py
+COPY web /app/web
 
 EXPOSE 8090
 

@@ -113,3 +113,26 @@ python3 remote_stream_demo.py \
 输出：
 - 控制台实时打印 `stt` 与 `llm_delta`（文本流）
 - `demo_out/reply_0001.wav`, `reply_0002.wav`, ...（语音流分段）
+
+## 7) Web UI (set input/output devices)
+
+After service starts, open:
+
+- `http://<server-ip>:8090/`
+
+Use the page to:
+- Refresh/select input device (mic)
+- Refresh/select output device (speaker, browser support required)
+- Connect session
+- Start Talking / Stop & Commit
+
+Notes:
+- Output device selection depends on browser support for `HTMLMediaElement.setSinkId` (works in Chromium-based browsers, limited on Safari).
+- Browser asks for microphone permission before listing device labels.
+
+## Auto conversation mode on Web UI
+
+- Click `Start Auto Talk` once.
+- The page listens continuously.
+- It auto-commits each utterance after silence (no manual submit).
+- While assistant is replying, capture is paused, then auto-resumes listening.

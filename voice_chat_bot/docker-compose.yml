@@ -6,7 +6,7 @@ services:
     ports:
       - "8090:8090"
     environment:
-      LLM_URL: "http://10.0.0.128:52415/v1/chat/completions"
+      LLM_URL: "http://192.168.20.2:52415/v1/chat/completions"
       LLM_MODEL: "mlx-community/GLM-4.7-Flash-5bit"
       TTS_WS_URL: "ws://xtts-api:8000/v1/tts/ws"
       TTS_LANGUAGE: "zh-cn"

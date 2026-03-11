@@ -25,3 +25,6 @@ services:
 networks:
   videoprocess_net:
     external: true
+
+
+

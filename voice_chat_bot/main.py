@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -11,6 +12,8 @@ import numpy as np
 import soundfile as sf
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from faster_whisper import WhisperModel
 
 from get_model import get_current_model
@@ -21,10 +24,11 @@ logger = logging.getLogger("voice-chat-bot")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8090"))
 
-LLM_URL = os.getenv("LLM_URL", "http://10.0.0.128:52415/v1/chat/completions")
+LLM_URL = os.getenv("LLM_URL", "http://192.168.20.2:52415/v1/chat/completions")
 #LLM_MODEL = os.getenv("LLM_MODEL", "mlx-community/GLM-4.7-Flash-5bit")
 LLM_MODEL = get_current_model()
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
+logger.info("resolved LLM model at startup: %s", LLM_MODEL)
 
 TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://127.0.0.1:8000/v1/tts/ws")
 TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "zh-cn")
@@ -44,6 +48,10 @@ SYSTEM_PROMPT = os.getenv(
 app = FastAPI(title="Streaming Voice Chat Bot", version="1.0.0")
 stt_model: Optional[WhisperModel] = None
 stt_model_lock = asyncio.Lock()
+WEB_DIR = Path(__file__).parent / "web"
+
+if WEB_DIR.exists():
+    app.mount("/web", StaticFiles(directory=str(WEB_DIR)), name="web")
 
 
 @dataclass
@@ -184,9 +192,24 @@ async def stream_llm_to_tts_and_client(
             "max_tokens": LLM_MAX_TOKENS,
             "stream": True,
         }
+        logger.info(
+            "sending LLM request: url=%s model=%s stream=%s",
+            LLM_URL,
+            payload["model"],
+            payload["stream"],
+        )
 
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", LLM_URL, json=payload) as resp:
+                if resp.status_code >= 400:
+                    err_body = (await resp.aread()).decode("utf-8", errors="replace")
+                    logger.error(
+                        "LLM request failed: status=%s url=%s model=%s body=%s",
+                        resp.status_code,
+                        LLM_URL,
+                        payload["model"],
+                        err_body[:2000],
+                    )
                 resp.raise_for_status()
 
                 async for line in resp.aiter_lines():
@@ -239,6 +262,14 @@ def health() -> dict[str, str | bool]:
         "stt_model": STT_MODEL_NAME,
         "stt_ready": stt_model is not None,
     }
+
+
+@app.get("/")
+def index():
+    index_file = WEB_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return {"message": "web ui not found"}
 
 
 @app.websocket("/ws/voice")
