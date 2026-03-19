@@ -4,7 +4,41 @@ import requests
 
 logger = logging.getLogger("voice-chat-bot")
 
+MODEL_FILE = os.getenv("EXO_MODEL_FILE", "/home/taiwei/Constructure/exo/model.txt")
+
+
+def _parse_model_line(line: str) -> str:
+    line = (line or "").strip()
+    if not line:
+        return ""
+    if line.endswith(")") and "(" in line:
+        return line.rsplit("(", 1)[-1].rstrip(")").strip()
+    return line
+
+
+def _read_model_from_txt(model_file: str = MODEL_FILE) -> str:
+    try:
+        with open(model_file, "r", encoding="utf-8") as fh:
+            candidates = [_parse_model_line(line) for line in fh]
+    except OSError as exc:
+        logger.warning("failed to read exo model file %s: %s", model_file, exc)
+        return ""
+
+    env_model = os.getenv("LLM_MODEL", "").strip()
+    candidates = [candidate for candidate in candidates if candidate]
+    if env_model and env_model in candidates:
+        logger.info("resolved LLM model from model.txt via env match: %s", env_model)
+        return env_model
+    if candidates:
+        logger.info("resolved LLM model from model.txt: %s", candidates[0])
+        return candidates[0]
+    return ""
+
+
 def get_current_model(exo_url="http://192.168.20.2:52415"):
+    txt_model = _read_model_from_txt()
+    if txt_model:
+        return txt_model
     try:
         state = requests.get(f"{exo_url}/state").json()
         for iid, inst in state.get("instances", {}).items():

@@ -7,7 +7,7 @@ services:
       - "8090:8090"
     environment:
       LLM_URL: "http://192.168.20.2:52415/v1/chat/completions"
-      LLM_MODEL: "mlx-community/GLM-4.7-Flash-5bit"
+      EXO_MODEL_FILE: "/run/exo/model.txt"
       TTS_WS_URL: "ws://xtts-api:8000/v1/tts/ws"
       TTS_LANGUAGE: "zh-cn"
       STT_MODEL: "medium"
@@ -17,6 +17,7 @@ services:
       HF_HOME: "/models/hf"
     volumes:
       - ./models:/models
+      - ../exo/model.txt:/run/exo/model.txt:ro
     networks:
       - videoprocess_net
     deploy:
