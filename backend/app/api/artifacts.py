@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
+from app.models.asset import Asset
 from app.models.artifact import Artifact, ArtifactKind
 from app.models.job import Job, JobStatus, NodeExecution
 from app.schemas.artifact import ArtifactResponse
@@ -74,10 +75,29 @@ async def cleanup_intermediates(
         if node_execution.node_id in terminal_nodes:
             continue
 
-        try:
-            await storage.delete(artifact.storage_path)
-        except Exception:
-            pass  # file may already be gone
+        shared_asset = await db.execute(
+            select(Asset.id)
+            .where(
+                Asset.storage_backend == artifact.storage_backend,
+                Asset.storage_path == artifact.storage_path,
+            )
+            .limit(1)
+        )
+        shared_artifact = await db.execute(
+            select(Artifact.id)
+            .where(
+                Artifact.id != artifact.id,
+                Artifact.storage_backend == artifact.storage_backend,
+                Artifact.storage_path == artifact.storage_path,
+            )
+            .limit(1)
+        )
+
+        if not shared_asset.scalar_one_or_none() and not shared_artifact.scalar_one_or_none():
+            try:
+                await storage.delete(artifact.storage_path)
+            except Exception:
+                pass  # file may already be gone
 
         freed_bytes += artifact.file_size or 0
         node_execution.output_artifact_id = None

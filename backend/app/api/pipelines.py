@@ -84,7 +84,10 @@ async def update(
 
 @router.delete("/pipelines/{pipeline_id}")
 async def delete(pipeline_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    deleted = await delete_pipeline(db, pipeline_id)
+    try:
+        deleted = await delete_pipeline(db, pipeline_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not deleted:
         raise HTTPException(status_code=404, detail="Pipeline not found")
     return {"status": "deleted"}

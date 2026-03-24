@@ -4,10 +4,25 @@ import useNodeTypes from '../../hooks/useNodeTypes';
 import apiClient from '../../api/client';
 import type { Asset, ParamDefinition } from '../../api/types';
 
+type YouTubeSearchResult = {
+  id: string;
+  title: string;
+  url: string;
+  thumbnail?: string | null;
+  duration?: number | null;
+  channel?: string | null;
+};
+
 export default function ConfigPanel() {
   const { nodes, selectedNodeId, updateNodeConfig, updateNodeLabel, removeNode } = useEditorStore();
   const { nodeTypes } = useNodeTypes();
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<YouTubeSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [channelFilter, setChannelFilter] = useState('');
+  const [durationFilter, setDurationFilter] = useState<'any' | 'short' | 'medium' | 'long'>('any');
 
   const node = nodes.find(n => n.id === selectedNodeId);
   const typeDef = node ? nodeTypes.find(t => t.type_name === (node.data.nodeType as string || node.type)) : null;
@@ -16,6 +31,20 @@ export default function ConfigPanel() {
     // Load assets for source node picker
     apiClient.get('/assets').then(res => setAssets(res.data.items || [])).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    setSearchResults([]);
+    setSearchError(null);
+    setSearchLoading(false);
+    setChannelFilter('');
+    setDurationFilter('any');
+    if (node?.data.nodeType === 'url_download') {
+      const nodeConfig = (node.data.config as Record<string, unknown> | undefined) || {};
+      setSearchQuery(String(nodeConfig.query || ''));
+      return;
+    }
+    setSearchQuery('');
+  }, [node?.id, node?.data.nodeType, node?.data.config]);
 
   if (!node || !typeDef) {
     return (
@@ -37,6 +66,57 @@ export default function ConfigPanel() {
   const handleChange = (name: string, value: unknown) => {
     updateNodeConfig(node.id, { [name]: value });
   };
+
+  const handleSearch = async () => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchError('Enter a search query first');
+      setSearchResults([]);
+      return;
+    }
+
+    try {
+      setSearchLoading(true);
+      setSearchError(null);
+      const response = await fetch('/youtube/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, max_results: 8 }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.detail || `Search failed with status ${response.status}`);
+      }
+      const payload = await response.json() as { results?: YouTubeSearchResult[] };
+      setSearchResults(payload.results || []);
+      handleChange('query', query);
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : 'Search failed');
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  const filteredSearchResults = searchResults.filter(result => {
+    const channel = result.channel?.toLowerCase() || '';
+    const channelNeedle = channelFilter.trim().toLowerCase();
+    if (channelNeedle && !channel.includes(channelNeedle)) {
+      return false;
+    }
+
+    const duration = result.duration || 0;
+    if (durationFilter === 'short' && duration > 4 * 60) {
+      return false;
+    }
+    if (durationFilter === 'medium' && (duration <= 4 * 60 || duration > 20 * 60)) {
+      return false;
+    }
+    if (durationFilter === 'long' && duration <= 20 * 60) {
+      return false;
+    }
+    return true;
+  });
 
   return (
     <div style={{
@@ -95,6 +175,154 @@ export default function ConfigPanel() {
         </div>
       )}
 
+      {node.data.nodeType === 'url_download' && (
+        <div style={{
+          marginBottom: 16,
+          padding: 12,
+          borderRadius: 8,
+          backgroundColor: '#111827',
+          border: '1px solid #1f2937',
+        }}>
+          <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 700, marginBottom: 8 }}>
+            YouTube Search
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+            Search uses yt-dlp, then fills the node URL. It does not consume official YouTube Data API quota.
+          </div>
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search YouTube videos"
+            style={{
+              width: '100%',
+              padding: '6px 8px',
+              backgroundColor: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: 4,
+              color: '#e2e8f0',
+              fontSize: 13,
+              outline: 'none',
+              marginBottom: 8,
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => void handleSearch()}
+            disabled={searchLoading}
+            style={{
+              width: '100%',
+              padding: '8px 10px',
+              backgroundColor: '#1d4ed8',
+              border: 'none',
+              borderRadius: 6,
+              color: '#eff6ff',
+              fontSize: 12,
+              cursor: searchLoading ? 'default' : 'pointer',
+              opacity: searchLoading ? 0.7 : 1,
+            }}
+          >
+            {searchLoading ? 'Searching...' : 'Search'}
+          </button>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 110px', gap: 8, marginTop: 8 }}>
+            <input
+              value={channelFilter}
+              onChange={e => setChannelFilter(e.target.value)}
+              placeholder="Filter by channel"
+              style={{
+                width: '100%',
+                padding: '6px 8px',
+                backgroundColor: '#0f172a',
+                border: '1px solid #334155',
+                borderRadius: 4,
+                color: '#e2e8f0',
+                fontSize: 12,
+                outline: 'none',
+              }}
+            />
+            <select
+              value={durationFilter}
+              onChange={e => setDurationFilter(e.target.value as 'any' | 'short' | 'medium' | 'long')}
+              style={{
+                width: '100%',
+                padding: '6px 8px',
+                backgroundColor: '#0f172a',
+                border: '1px solid #334155',
+                borderRadius: 4,
+                color: '#e2e8f0',
+                fontSize: 12,
+                outline: 'none',
+              }}
+            >
+              <option value="any">Any length</option>
+              <option value="short">Short</option>
+              <option value="medium">Medium</option>
+              <option value="long">Long</option>
+            </select>
+          </div>
+          {searchError ? (
+            <div style={{ fontSize: 11, color: '#fca5a5', marginTop: 8 }}>{searchError}</div>
+          ) : null}
+          {searchResults.length > 0 ? (
+            <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+              <div style={{ fontSize: 11, color: '#64748b' }}>
+                Showing {filteredSearchResults.length} of {searchResults.length} results
+              </div>
+              {filteredSearchResults.map(result => (
+                <button
+                  key={result.id}
+                  type="button"
+                  onClick={() => handleChange('url', result.url)}
+                  style={{
+                    textAlign: 'left',
+                    padding: 10,
+                    borderRadius: 6,
+                    border: '1px solid #334155',
+                    backgroundColor: '#0f172a',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'grid', gridTemplateColumns: '96px 1fr', gap: 10, alignItems: 'start' }}>
+                    <div style={{
+                      width: 96,
+                      aspectRatio: '16 / 9',
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      backgroundColor: '#1e293b',
+                      border: '1px solid #334155',
+                    }}>
+                      {result.thumbnail ? (
+                        <img
+                          src={result.thumbnail}
+                          alt={result.title}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                        />
+                      ) : null}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                        {result.title}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>
+                        {[result.channel, formatDuration(result.duration)].filter(Boolean).join(' · ')}
+                      </div>
+                      <div style={{ fontSize: 10, color: '#60a5fa', wordBreak: 'break-all' }}>
+                        {result.url}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+              {filteredSearchResults.length === 0 ? (
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                  No results match the current filters.
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      )}
+
       {/* Params */}
       {typeDef.params
         .filter(p => p.name !== 'asset_id' && p.name !== 'media_type')
@@ -126,6 +354,17 @@ export default function ConfigPanel() {
       </div>
     </div>
   );
+}
+
+function formatDuration(duration?: number | null) {
+  if (!duration || duration <= 0) return null;
+  const hours = Math.floor(duration / 3600);
+  const minutes = Math.floor((duration % 3600) / 60);
+  const seconds = duration % 60;
+  const parts = [hours, minutes, seconds]
+    .filter((value, index) => value > 0 || index > 0)
+    .map(value => String(value).padStart(2, '0'));
+  return parts.join(':');
 }
 
 function ParamField({

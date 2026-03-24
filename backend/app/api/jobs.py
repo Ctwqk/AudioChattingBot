@@ -1,14 +1,16 @@
 from __future__ import annotations
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
+from app.models.artifact import Artifact
 from app.schemas.job import (
     JobCreate, BatchJobCreate, JobResponse, JobDetailResponse, JobListResponse,
     NodeExecutionResponse,
 )
 from app.services.job_service import (
-    create_job, create_job_from_snapshot, get_job, list_jobs, cancel_job,
+    create_job, create_job_from_snapshot, get_job, list_jobs, cancel_job, delete_job,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"])
@@ -28,7 +30,18 @@ def _to_response(job) -> JobResponse:
     )
 
 
-def _to_detail(job) -> JobDetailResponse:
+async def _load_output_artifacts(db: AsyncSession, job) -> dict[uuid.UUID, Artifact]:
+    artifact_ids = [ne.output_artifact_id for ne in job.node_executions if ne.output_artifact_id]
+    if not artifact_ids:
+        return {}
+
+    result = await db.execute(select(Artifact).where(Artifact.id.in_(artifact_ids)))
+    artifacts = result.scalars().all()
+    return {artifact.id: artifact for artifact in artifacts}
+
+
+async def _to_detail(db: AsyncSession, job) -> JobDetailResponse:
+    artifacts_by_id = await _load_output_artifacts(db, job)
     return JobDetailResponse(
         id=str(job.id),
         pipeline_id=str(job.pipeline_id),
@@ -56,6 +69,16 @@ def _to_detail(job) -> JobDetailResponse:
                 error_message=ne.error_message,
                 input_artifact_ids=[str(a) for a in (ne.input_artifact_ids or [])],
                 output_artifact_id=str(ne.output_artifact_id) if ne.output_artifact_id else None,
+                output_artifact_filename=(
+                    artifacts_by_id[ne.output_artifact_id].filename
+                    if ne.output_artifact_id and ne.output_artifact_id in artifacts_by_id
+                    else None
+                ),
+                output_artifact_media_info=(
+                    artifacts_by_id[ne.output_artifact_id].media_info
+                    if ne.output_artifact_id and ne.output_artifact_id in artifacts_by_id
+                    else None
+                ),
             )
             for ne in job.node_executions
         ],
@@ -74,7 +97,7 @@ async def submit_job(data: JobCreate, db: AsyncSession = Depends(get_db)):
     from app.orchestrator.engine import engine
     asyncio.create_task(engine.start_job(job.id))
 
-    return _to_detail(job)
+    return await _to_detail(db, job)
 
 
 @router.get("/jobs", response_model=JobListResponse)
@@ -98,7 +121,7 @@ async def get_one(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     job = await get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return _to_detail(job)
+    return await _to_detail(db, job)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobDetailResponse)
@@ -106,7 +129,7 @@ async def cancel(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     job = await cancel_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return _to_detail(job)
+    return await _to_detail(db, job)
 
 
 @router.post("/jobs/batch", response_model=list[JobDetailResponse], status_code=201)
@@ -127,7 +150,7 @@ async def submit_batch(data: BatchJobCreate, db: AsyncSession = Depends(get_db))
     for job in jobs:
         asyncio.create_task(engine.start_job(job.id))
 
-    return [_to_detail(j) for j in jobs]
+    return [await _to_detail(db, j) for j in jobs]
 
 
 @router.post("/jobs/{job_id}/rerun", response_model=JobDetailResponse, status_code=201)
@@ -146,4 +169,16 @@ async def rerun(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     from app.orchestrator.engine import engine
     asyncio.create_task(engine.start_job(new_job.id))
 
-    return _to_detail(new_job)
+    return await _to_detail(db, new_job)
+
+
+@router.delete("/jobs/{job_id}", status_code=200)
+async def delete_one(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    try:
+        deleted = await delete_job(db, job_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "deleted"}

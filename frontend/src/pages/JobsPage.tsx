@@ -26,6 +26,19 @@ export default function JobsPage() {
     return () => clearInterval(interval);
   }, []);
 
+  const handleDeleteJob = async (jobId: string) => {
+    if (!window.confirm(`Delete job ${jobId.slice(0, 8)}...?`)) {
+      return;
+    }
+
+    try {
+      await apiClient.delete(`/jobs/${jobId}`);
+      setJobs(current => current.filter(job => job.id !== jobId));
+    } catch {
+      alert('Failed to delete job');
+    }
+  };
+
   return (
     <div style={{ padding: 24, color: '#e2e8f0', overflowY: 'auto', height: '100%' }}>
       <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>Jobs</h1>
@@ -74,6 +87,22 @@ export default function JobsPage() {
                     style={{ color: '#3b82f6', textDecoration: 'none', marginRight: 12 }}>
                     View
                   </Link>
+                  {!['PENDING', 'PLANNING', 'RUNNING'].includes(job.status) && (
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteJob(job.id)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#f87171',
+                        cursor: 'pointer',
+                        padding: 0,
+                        fontSize: 13,
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

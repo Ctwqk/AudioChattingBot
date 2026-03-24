@@ -1,7 +1,9 @@
 from __future__ import annotations
 import uuid
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.models.job import Job
 from app.models.pipeline import Pipeline
 from app.schemas.pipeline import PipelineCreate, PipelineUpdate, PipelineDefinition, ValidationResult
 from app.orchestrator.dag import validate_pipeline
@@ -68,8 +70,29 @@ async def delete_pipeline(db: AsyncSession, pipeline_id: uuid.UUID) -> bool:
     pipeline = await db.get(Pipeline, pipeline_id)
     if not pipeline:
         return False
-    await db.delete(pipeline)
-    await db.commit()
+
+    referencing_jobs = (
+        await db.execute(
+            select(func.count()).select_from(Job).where(Job.pipeline_id == pipeline_id)
+        )
+    ).scalar() or 0
+
+    if referencing_jobs > 0:
+        if not pipeline.is_template:
+            raise ValueError("Pipeline is referenced by existing jobs and cannot be deleted")
+
+        pipeline.is_template = False
+        pipeline.template_tags = []
+        pipeline.version += 1
+        await db.commit()
+        return True
+
+    try:
+        await db.delete(pipeline)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ValueError("Pipeline is referenced by existing jobs and cannot be deleted")
     return True
 
 

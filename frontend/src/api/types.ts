@@ -52,7 +52,6 @@ export interface Job {
 
 export interface NodeExecution {
   id: string;
-  job_id: string;
   node_id: string;
   node_type: string;
   node_label: string;
@@ -62,6 +61,8 @@ export interface NodeExecution {
   completed_at: string | null;
   error_message: string | null;
   output_artifact_id: string | null;
+  output_artifact_filename?: string | null;
+  output_artifact_media_info?: Record<string, unknown> | null;
 }
 
 // Asset types

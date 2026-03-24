@@ -26,8 +26,8 @@ class BaseHandler(abc.ABC):
         node_config: dict,
         input_paths: dict[str, str],   # port_name -> local file path
         output_path: str,               # local file path for output
-    ) -> None:
-        """Execute the node operation. Raise on failure."""
+    ) -> dict | None:
+        """Execute the node operation. Raise on failure and optionally return artifact metadata."""
         ...
 
     def cancel(self) -> None:

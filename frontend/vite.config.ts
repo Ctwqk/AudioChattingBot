@@ -7,7 +7,16 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:8081',
+      '/api': 'http://localhost:8080',
+      '/ws': {
+        target: 'http://localhost:8080',
+        ws: true,
+      },
+      '/youtube': {
+        target: 'http://localhost:8899',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/youtube/, ''),
+      },
     },
   },
 })

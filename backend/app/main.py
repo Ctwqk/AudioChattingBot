@@ -1,24 +1,80 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+STALE_NODE_RECOVERY_THRESHOLD = timedelta(minutes=10)
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _prepare_job_for_recovery(db, job) -> bool:
+    """Reset clearly abandoned QUEUED/RUNNING nodes so startup recovery can redispatch them."""
+    from app.models.job import JobStatus, NodeStatus
+
+    now = datetime.now(timezone.utc)
+    changed = False
+
+    for node in job.node_executions:
+        if node.status not in (NodeStatus.QUEUED, NodeStatus.RUNNING):
+            continue
+
+        reference_time = _ensure_utc(node.started_at or node.queued_at or job.started_at or job.submitted_at)
+        if not reference_time or (now - reference_time) < STALE_NODE_RECOVERY_THRESHOLD:
+            continue
+
+        logger.warning(
+            "Resetting stale node %s for job %s from %s to PENDING during startup recovery",
+            node.node_id, job.id, node.status.value,
+        )
+        node.status = NodeStatus.PENDING
+        node.worker_id = None
+        node.queued_at = None
+        node.started_at = None
+        node.completed_at = None
+        node.progress = 0
+        node.error_message = None
+        node.input_artifact_ids = []
+        changed = True
+
+    if changed and job.status in (JobStatus.RUNNING, JobStatus.PLANNING):
+        job.status = JobStatus.PENDING
+        job.error_message = None
+        job.completed_at = None
+
+    return changed
 
 
 async def _recover_stale_jobs():
     """On startup, find PENDING/RUNNING jobs and restart them."""
     from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
     from app.db import async_session
     from app.models.job import Job, JobStatus
     from app.orchestrator.engine import engine
 
     async with async_session() as db:
-        stmt = select(Job).where(Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PLANNING]))
+        stmt = (
+            select(Job)
+            .where(Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PLANNING]))
+            .options(selectinload(Job.node_executions))
+        )
         result = await db.execute(stmt)
         stale_jobs = list(result.scalars().all())
+
+        for job in stale_jobs:
+            await _prepare_job_for_recovery(db, job)
+        await db.commit()
 
     for job in stale_jobs:
         logger.info(f"Recovering stale job {job.id} (status={job.status.value})")

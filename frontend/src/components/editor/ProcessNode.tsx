@@ -1,5 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
+import * as LucideIcons from 'lucide-react';
 import useNodeTypes from '../../hooks/useNodeTypes';
 
 interface ProcessNodeProps {
@@ -20,6 +21,18 @@ const PORT_COLORS: Record<string, string> = {
   any_media: '#6b7280',
 };
 
+function NodeIcon({ name }: { name: string }) {
+  const key = name
+    .split('-')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join('');
+  const Icon = (LucideIcons as unknown as Record<string, React.ComponentType<{ size?: number }>>)[key];
+  if (!Icon) {
+    return <span style={{ fontSize: 16, lineHeight: 1 }}>⬡</span>;
+  }
+  return <Icon size={16} />;
+}
+
 function ProcessNode({ data, selected }: ProcessNodeProps) {
   const { nodeTypes } = useNodeTypes();
   const typeName = data.nodeType || 'unknown';
@@ -27,7 +40,7 @@ function ProcessNode({ data, selected }: ProcessNodeProps) {
 
   const inputs = typeDef?.inputs || [];
   const outputs = typeDef?.outputs || [];
-  const icon = typeDef?.icon || '⬡';
+  const icon = typeDef?.icon || '';
 
   return (
     <div
@@ -60,7 +73,9 @@ function ProcessNode({ data, selected }: ProcessNodeProps) {
 
       {/* Node content */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-        <span style={{ fontSize: 16 }}>{icon}</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+          <NodeIcon name={icon} />
+        </span>
         <span style={{ fontWeight: 600 }}>{data.label || typeDef?.display_name || typeName}</span>
       </div>
       <div style={{ color: '#94a3b8', fontSize: 11 }}>

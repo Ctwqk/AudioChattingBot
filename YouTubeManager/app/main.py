@@ -1,15 +1,19 @@
 import asyncio
+import json
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 from typing import Optional, List
 
 import aiofiles
 import yt_dlp
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -35,9 +39,14 @@ SCOPES = [
 CREDENTIALS_DIR = "/app/credentials"
 TOKEN_FILE = os.path.join(CREDENTIALS_DIR, "token.json")
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/app/downloads")
+AUTH_STATE_TTL_SECONDS = 600
+DAILY_UPLOAD_QUOTA_LIMIT = 10_000
+UPLOAD_INSERT_COST = 1_600
+QUOTA_USAGE_FILE = os.path.join(CREDENTIALS_DIR, "quota_usage.json")
 
 executor = ThreadPoolExecutor(max_workers=4)
 tasks: dict = {}  # task_id -> task dict
+auth_sessions: dict[str, dict[str, str | float]] = {}
 
 # ---------------------------------------------------------------------------
 # FastAPI app setup
@@ -90,6 +99,89 @@ def new_task(task_type: str) -> str:
     return task_id
 
 
+def _today_utc() -> str:
+    return datetime.utcnow().date().isoformat()
+
+
+def load_quota_usage() -> dict:
+    default = {
+        "date": _today_utc(),
+        "daily_limit": DAILY_UPLOAD_QUOTA_LIMIT,
+        "estimated_units_used": 0,
+        "estimated_upload_requests": 0,
+        "last_video_id": None,
+        "last_recorded_at": None,
+    }
+    if not os.path.exists(QUOTA_USAGE_FILE):
+        return default
+    try:
+        with open(QUOTA_USAGE_FILE, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return default
+    if data.get("date") != default["date"]:
+        return default
+    return {**default, **data}
+
+
+def save_quota_usage(data: dict) -> None:
+    os.makedirs(CREDENTIALS_DIR, exist_ok=True)
+    with open(QUOTA_USAGE_FILE, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+
+
+def record_quota_estimate(*, increment_units: bool = False, video_id: str | None = None) -> None:
+    data = load_quota_usage()
+    if increment_units:
+        data["estimated_units_used"] = int(data.get("estimated_units_used", 0)) + UPLOAD_INSERT_COST
+        data["estimated_upload_requests"] = int(data.get("estimated_upload_requests", 0)) + 1
+    if video_id:
+        data["last_video_id"] = video_id
+    data["last_recorded_at"] = datetime.utcnow().isoformat() + "Z"
+    save_quota_usage(data)
+
+
+def get_quota_status() -> dict:
+    data = load_quota_usage()
+    used = int(data.get("estimated_units_used", 0))
+    limit = int(data.get("daily_limit", DAILY_UPLOAD_QUOTA_LIMIT))
+    return {
+        "date": data["date"],
+        "daily_limit": limit,
+        "estimated_units_used": used,
+        "estimated_units_remaining": max(0, limit - used),
+        "estimated_upload_requests": int(data.get("estimated_upload_requests", 0)),
+        "upload_cost_per_request": UPLOAD_INSERT_COST,
+        "source": "local_estimate",
+        "search_uses_official_quota": False,
+        "last_video_id": data.get("last_video_id"),
+        "last_recorded_at": data.get("last_recorded_at"),
+        "note": (
+            "YouTube does not expose a simple realtime remaining-quota endpoint here. "
+            "This is a local estimate based on upload requests recorded by this system. "
+            "yt-dlp search in this app does not consume official YouTube Data API quota."
+        ),
+    }
+
+
+def build_return_url(base_url: str, status: str) -> str:
+    parsed = urlparse(base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["youtube_auth"] = status
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def is_allowed_return_to(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # yt-dlp helpers
 # ---------------------------------------------------------------------------
@@ -98,10 +190,9 @@ def search_youtube(query: str, max_results: int = 10) -> list:
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
-        "default_search": f"ytsearch{max_results}",
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        result = ydl.extract_info(query, download=False)
+        result = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
         entries = result.get("entries", [])
         videos = []
         for entry in entries:
@@ -156,19 +247,7 @@ def download_video(url: str, task_id: str, format_str: str = "best") -> None:
 def get_auth_flow() -> "Flow":
     if not GOOGLE_AVAILABLE:
         raise RuntimeError("google-auth-oauthlib is not installed")
-    client_secrets = os.environ.get("GOOGLE_CLIENT_SECRETS_FILE")
-    if not client_secrets:
-        legacy_default = os.path.join(CREDENTIALS_DIR, "client_secrets.json")
-        if os.path.exists(legacy_default):
-            client_secrets = legacy_default
-        else:
-            matches = sorted(Path(CREDENTIALS_DIR).glob("client_secret*.json"))
-            if not matches:
-                raise RuntimeError(
-                    f"No OAuth client secrets found in {CREDENTIALS_DIR}. "
-                    "Add client_secret*.json or set GOOGLE_CLIENT_SECRETS_FILE."
-                )
-            client_secrets = str(matches[0])
+    client_secrets = resolve_client_secrets_path()
     redirect_uri = os.environ.get(
         "OAUTH_REDIRECT_URI", "http://localhost:8899/api/auth/callback"
     )
@@ -176,6 +255,34 @@ def get_auth_flow() -> "Flow":
         client_secrets, scopes=SCOPES, redirect_uri=redirect_uri
     )
     return flow
+
+
+def prune_auth_sessions() -> None:
+    cutoff = time.time() - AUTH_STATE_TTL_SECONDS
+    expired_states = [
+        state for state, session in auth_sessions.items()
+        if float(session.get("created_at", 0)) < cutoff
+    ]
+    for state in expired_states:
+        auth_sessions.pop(state, None)
+
+
+def resolve_client_secrets_path() -> str:
+    client_secrets = os.environ.get("GOOGLE_CLIENT_SECRETS_FILE")
+    if client_secrets and os.path.exists(client_secrets):
+        return client_secrets
+
+    legacy_default = os.path.join(CREDENTIALS_DIR, "client_secrets.json")
+    if os.path.exists(legacy_default):
+        return legacy_default
+
+    matches = sorted(Path(CREDENTIALS_DIR).glob("client_secret*.json"))
+    if not matches:
+        raise RuntimeError(
+            f"No OAuth client secrets found in {CREDENTIALS_DIR}. "
+            "Add client_secret*.json or set GOOGLE_CLIENT_SECRETS_FILE."
+        )
+    return str(matches[0])
 
 
 def get_credentials() -> Optional["Credentials"]:
@@ -224,6 +331,7 @@ def upload_to_youtube(
         request = youtube.videos().insert(
             part="snippet,status", body=body, media_body=media
         )
+        record_quota_estimate(increment_units=True)
 
         tasks[task_id]["status"] = "uploading"
         response = None
@@ -232,6 +340,7 @@ def upload_to_youtube(
             if status:
                 tasks[task_id]["progress"] = int(status.progress() * 100)
 
+        record_quota_estimate(video_id=response["id"])
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["progress"] = 100
         tasks[task_id]["result"] = {
@@ -338,25 +447,37 @@ async def delete_download(filename: str):
 # Routes: Auth
 # ---------------------------------------------------------------------------
 @app.get("/api/auth/url")
-async def get_auth_url():
+async def get_auth_url(return_to: str | None = None, mode: str | None = None):
     if not GOOGLE_AVAILABLE:
         raise HTTPException(
             status_code=503, detail="Google auth libraries not available"
         )
-    client_secrets = os.environ.get(
-        "GOOGLE_CLIENT_SECRETS_FILE",
-        os.path.join(CREDENTIALS_DIR, "client_secrets.json"),
-    )
-    if not os.path.exists(client_secrets):
+    try:
+        resolve_client_secrets_path()
+    except RuntimeError as e:
         raise HTTPException(
             status_code=503,
-            detail="client_secrets.json not found. Please place it in the credentials directory.",
+            detail=str(e),
         )
     try:
+        prune_auth_sessions()
         flow = get_auth_flow()
-        auth_url, _ = flow.authorization_url(
-            access_type="offline", include_granted_scopes="true", prompt="consent"
-        )
+        auth_kwargs = {
+            "access_type": "offline",
+            "include_granted_scopes": "true",
+        }
+        if not os.path.exists(TOKEN_FILE):
+            auth_kwargs["prompt"] = "consent"
+        auth_url, state = flow.authorization_url(**auth_kwargs)
+        code_verifier = getattr(flow, "code_verifier", None)
+        if not code_verifier:
+            raise RuntimeError("Failed to create OAuth PKCE verifier")
+        auth_sessions[state] = {
+            "code_verifier": code_verifier,
+            "created_at": time.time(),
+            "return_to": return_to or "",
+            "mode": mode or "",
+        }
         return {"url": auth_url}
     except Exception as e:
         raise HTTPException(
@@ -364,40 +485,112 @@ async def get_auth_url():
         )
 
 
+@app.get("/api/auth/start")
+async def start_auth(return_to: str | None = None, mode: str | None = None):
+    payload = await get_auth_url(return_to=return_to, mode=mode)
+    return RedirectResponse(url=payload["url"], status_code=307)
+
+
 @app.get("/api/auth/callback")
-async def auth_callback(code: str):
+async def auth_callback(code: str, state: str):
     if not GOOGLE_AVAILABLE:
         raise HTTPException(
             status_code=503, detail="Google auth libraries not available"
         )
     try:
+        prune_auth_sessions()
+        session = auth_sessions.pop(state, None)
+        if not session:
+            raise RuntimeError(
+                "OAuth session expired or is invalid. Start login again from /api/auth/url."
+            )
         flow = get_auth_flow()
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code, code_verifier=str(session["code_verifier"]))
         creds = flow.credentials
         os.makedirs(CREDENTIALS_DIR, exist_ok=True)
         with open(TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
+        return_to = str(session.get("return_to") or "")
+        mode = str(session.get("mode") or "")
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Authorization failed: {str(e)}"
         )
-    return {"message": "Authorization successful", "authenticated": True}
+    if is_allowed_return_to(return_to) and mode != "popup":
+        return RedirectResponse(url=build_return_url(return_to, "success"), status_code=303)
+    if mode == "popup":
+        safe_return_to = build_return_url(return_to, "success") if is_allowed_return_to(return_to) else ""
+        target_origin = ""
+        if safe_return_to:
+            parsed_return_to = urlparse(safe_return_to)
+            target_origin = f"{parsed_return_to.scheme}://{parsed_return_to.netloc}"
+        return HTMLResponse(
+            f"""
+            <html>
+              <head><title>YouTube Authorized</title></head>
+              <body style="font-family:sans-serif;padding:32px;line-height:1.5">
+                <h1>YouTube authorization complete</h1>
+                <p>The token has been saved. This page should close automatically.</p>
+                <button id="return-btn" type="button">Return to VideoProcess</button>
+                <script>
+                  const returnTo = {json.dumps(safe_return_to)};
+                  const targetOrigin = {json.dumps(target_origin)};
+                  const hasOpener = !!(window.opener && !window.opener.closed);
+
+                  if (hasOpener) {{
+                    try {{
+                      window.opener.postMessage({{ type: "vp-youtube-auth", status: "success" }}, targetOrigin || window.location.origin);
+                    }} catch (error) {{
+                      console.error(error);
+                    }}
+                    window.setTimeout(() => window.close(), 300);
+                  }} else if (returnTo) {{
+                    window.location.replace(returnTo);
+                  }}
+
+                  document.getElementById("return-btn")?.addEventListener("click", () => {{
+                    if (hasOpener) {{
+                      window.close();
+                      return;
+                    }}
+                    if (returnTo) {{
+                      window.location.href = returnTo;
+                    }}
+                  }});
+                </script>
+              </body>
+            </html>
+            """
+        )
+    return HTMLResponse(
+        """
+        <html>
+          <head><title>YouTube Authorized</title></head>
+          <body style="font-family:sans-serif;padding:32px;line-height:1.5">
+            <h1>YouTube authorization complete</h1>
+            <p>The token has been saved. You can close this page and return to VideoProcess.</p>
+            <button onclick="window.close()">Close</button>
+          </body>
+        </html>
+        """
+    )
 
 
 @app.get("/api/auth/status")
 async def auth_status():
     if not GOOGLE_AVAILABLE:
         return {"authenticated": False, "reason": "Google libraries not available"}
-    client_secrets = os.environ.get(
-        "GOOGLE_CLIENT_SECRETS_FILE",
-        os.path.join(CREDENTIALS_DIR, "client_secrets.json"),
-    )
-    has_secrets = os.path.exists(client_secrets)
+    try:
+        resolve_client_secrets_path()
+        has_secrets = True
+    except RuntimeError:
+        has_secrets = False
     creds = get_credentials()
     return {
         "authenticated": creds is not None,
         "has_client_secrets": has_secrets,
         "token_exists": os.path.exists(TOKEN_FILE),
+        "quota_estimate": get_quota_status(),
     }
 
 

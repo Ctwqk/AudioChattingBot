@@ -130,8 +130,8 @@ async def process_task(data: dict) -> None:
         # Start cancel watcher
         cancel_check_task = asyncio.create_task(_cancel_watcher())
 
-        # Execute handler
-        await handler.execute(config, input_paths, output_local_path)
+        # Execute handler. Some handlers return artifact metadata for richer job results.
+        handler_metadata = await handler.execute(config, input_paths, output_local_path)
 
         # Verify output exists
         if not os.path.exists(output_local_path):
@@ -155,6 +155,7 @@ async def process_task(data: dict) -> None:
                 file_size=file_size,
                 storage_backend=settings.storage_backend,
                 storage_path=output_storage_path if settings.storage_backend != "local" else str(output_local_path),
+                media_info=handler_metadata if isinstance(handler_metadata, dict) else None,
             )
             db.add(artifact)
             await db.flush()

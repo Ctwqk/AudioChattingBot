@@ -1,7 +1,12 @@
 import os
 import shutil
+import json
 from pathlib import Path
+from datetime import datetime
 from worker.handlers.base import BaseHandler
+
+DAILY_UPLOAD_QUOTA_LIMIT = 10_000
+UPLOAD_INSERT_COST = 1_600
 
 
 class YouTubeUploadHandler(BaseHandler):
@@ -32,12 +37,60 @@ class YouTubeUploadHandler(BaseHandler):
                 "Mount a directory containing client_secret*.json and token.json."
             )
 
-        await self._upload_youtube(
+        upload_result = await self._upload_youtube(
             input_file, title, description, privacy, tags, cred_dir, client_secret
         )
 
         # Copy input to output_path for artifact tracking
         shutil.copy2(input_file, output_path)
+        return {
+            "youtube": upload_result,
+        }
+
+    def _quota_file_path(self, cred_dir: str) -> Path:
+        return Path(cred_dir) / "quota_usage.json"
+
+    def _load_quota_usage(self, cred_dir: str) -> dict:
+        today = datetime.utcnow().date().isoformat()
+        quota_path = self._quota_file_path(cred_dir)
+        default = {
+            "date": today,
+            "daily_limit": DAILY_UPLOAD_QUOTA_LIMIT,
+            "estimated_units_used": 0,
+            "estimated_upload_requests": 0,
+            "last_video_id": None,
+            "last_recorded_at": None,
+        }
+        if not quota_path.exists():
+            return default
+        try:
+            data = json.loads(quota_path.read_text())
+        except Exception:
+            return default
+        if data.get("date") != today:
+            return default
+        return {**default, **data}
+
+    def _save_quota_usage(self, cred_dir: str, data: dict) -> None:
+        quota_path = self._quota_file_path(cred_dir)
+        quota_path.parent.mkdir(parents=True, exist_ok=True)
+        quota_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+    def _record_quota_estimate(
+        self,
+        cred_dir: str,
+        *,
+        increment_units: bool = False,
+        video_id: str | None = None,
+    ) -> None:
+        data = self._load_quota_usage(cred_dir)
+        if increment_units:
+            data["estimated_units_used"] = int(data.get("estimated_units_used", 0)) + UPLOAD_INSERT_COST
+            data["estimated_upload_requests"] = int(data.get("estimated_upload_requests", 0)) + 1
+        if video_id:
+            data["last_video_id"] = video_id
+        data["last_recorded_at"] = datetime.utcnow().isoformat() + "Z"
+        self._save_quota_usage(cred_dir, data)
 
     async def _upload_youtube(
         self, video_path, title, description, privacy, tags, cred_dir, client_secret
@@ -97,12 +150,24 @@ class YouTubeUploadHandler(BaseHandler):
             body=body,
             media_body=media,
         )
+        self._record_quota_estimate(cred_dir, increment_units=True)
 
         response = None
         while response is None:
             _, response = request.next_chunk()
 
+        video_id = response.get("id")
+        self._record_quota_estimate(cred_dir, video_id=video_id)
+
         import logging
         logging.getLogger("worker").info(
-            f"YouTube upload complete: video_id={response.get('id')}"
+            f"YouTube upload complete: video_id={video_id}"
         )
+        return {
+            "video_id": video_id,
+            "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else None,
+            "title": title,
+            "privacy": privacy,
+            "tags": tags,
+            "quota_cost_estimate": UPLOAD_INSERT_COST,
+        }

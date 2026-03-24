@@ -10,7 +10,7 @@ services:
     environment:
       - GOOGLE_CLIENT_SECRETS_FILE=/app/credentials/client_secret_62449607041-mn44n8pmkl9pc6tdah7bmd67tid3qgc5.apps.googleusercontent.com.json
       - DOWNLOAD_DIR=/app/downloads
-      - OAUTH_REDIRECT_URI=http://localhost:8899/api/auth/callback
+      - OAUTH_REDIRECT_URI=http://localhost:3001/youtube/api/auth/callback
     restart: unless-stopped
     networks:
       - videoprocess_net

@@ -27,6 +27,8 @@ class NodeExecutionResponse(BaseModel):
     error_message: str | None
     input_artifact_ids: list[str]
     output_artifact_id: str | None
+    output_artifact_filename: str | None = None
+    output_artifact_media_info: dict | None = None
 
 
 class JobResponse(BaseModel):

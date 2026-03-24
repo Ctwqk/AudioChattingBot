@@ -156,3 +156,16 @@ async def cancel_job(db: AsyncSession, job_id: uuid.UUID) -> Job | None:
     await db.commit()
     await db.refresh(job, attribute_names=["node_executions"])
     return job
+
+
+async def delete_job(db: AsyncSession, job_id: uuid.UUID) -> bool:
+    job = await db.get(Job, job_id)
+    if not job:
+        return False
+
+    if job.status in (JobStatus.PENDING, JobStatus.PLANNING, JobStatus.RUNNING):
+        raise ValueError("Only terminal jobs can be deleted")
+
+    await db.delete(job)
+    await db.commit()
+    return True

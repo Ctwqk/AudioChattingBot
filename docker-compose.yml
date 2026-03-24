@@ -111,6 +111,7 @@ services:
       - api
     networks:
       - vp_internal
+      - youtube_bridge
 
 volumes:
   pg_data:
@@ -121,3 +122,6 @@ volumes:
 networks:
   vp_internal:
     driver: bridge
+  youtube_bridge:
+    external: true
+    name: videoprocess_net

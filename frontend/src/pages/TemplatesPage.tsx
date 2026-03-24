@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import apiClient from '../api/client';
 import type { Pipeline } from '../api/types';
 
@@ -8,11 +9,15 @@ export default function TemplatesPage() {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  useEffect(() => {
+  const fetchTemplates = () => {
     apiClient.get('/templates').then(res => {
       setTemplates(res.data.items);
       setLoading(false);
     }).catch(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchTemplates();
   }, []);
 
   const handleUseTemplate = async (templateId: string) => {
@@ -21,6 +26,22 @@ export default function TemplatesPage() {
       navigate(`/editor/${res.data.id}`);
     } catch {
       alert('Failed to create from template');
+    }
+  };
+
+  const handleDeleteTemplate = async (templateId: string, templateName: string) => {
+    if (!window.confirm(`Delete template "${templateName}"?`)) {
+      return;
+    }
+
+    try {
+      await apiClient.delete(`/pipelines/${templateId}`);
+      setTemplates(current => current.filter(tpl => tpl.id !== templateId));
+    } catch (error) {
+      const detail = axios.isAxiosError(error)
+        ? error.response?.data?.detail
+        : null;
+      alert(detail || 'Failed to delete template');
     }
   };
 
@@ -65,21 +86,38 @@ export default function TemplatesPage() {
                   ))}
                 </div>
               )}
-              <button
-                onClick={() => handleUseTemplate(tpl.id)}
-                style={{
-                  padding: '6px 16px',
-                  backgroundColor: '#2563eb',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: 6,
-                  cursor: 'pointer',
-                  fontSize: 13,
-                  fontWeight: 500,
-                }}
-              >
-                Use Template
-              </button>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => handleUseTemplate(tpl.id)}
+                  style={{
+                    padding: '6px 16px',
+                    backgroundColor: '#2563eb',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 6,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    fontWeight: 500,
+                  }}
+                >
+                  Use Template
+                </button>
+                <button
+                  onClick={() => void handleDeleteTemplate(tpl.id, tpl.name)}
+                  style={{
+                    padding: '6px 16px',
+                    backgroundColor: '#7f1d1d',
+                    color: '#fecaca',
+                    border: '1px solid #991b1b',
+                    borderRadius: 6,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    fontWeight: 500,
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           ))}
         </div>
