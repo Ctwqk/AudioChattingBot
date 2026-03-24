@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml .
+RUN pip install --upgrade pip && pip install ".[worker]"
+
+COPY app /app/app
+COPY worker /app/worker
+
+CMD ["python", "-m", "worker.main"]

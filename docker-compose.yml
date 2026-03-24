@@ -1,0 +1,123 @@
+services:
+  # ---------- Infrastructure ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: vp_postgres
+    environment:
+      POSTGRES_DB: videoprocess
+      POSTGRES_USER: vp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vp_secret}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vp -d videoprocess"]
+      interval: 5s
+      retries: 5
+    networks:
+      - vp_internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: vp_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+    networks:
+      - vp_internal
+
+  minio:
+    image: minio/minio:latest
+    container_name: vp_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      retries: 5
+    networks:
+      - vp_internal
+
+  # ---------- Application ----------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    container_name: vp_api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://vp:${POSTGRES_PASSWORD:-vp_secret}@postgres:5432/videoprocess
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      STORAGE_LOCAL_ROOT: /data/storage
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: videoprocess
+    volumes:
+      - storage_data:/data/storage
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vp_internal
+
+  ffmpeg-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: vp_ffmpeg_worker_1
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WORKER_TYPE: ffmpeg
+      WORKER_CONCURRENCY: "2"
+      STORAGE_LOCAL_ROOT: /data/storage
+      DATABASE_URL: postgresql+asyncpg://vp:${POSTGRES_PASSWORD:-vp_secret}@postgres:5432/videoprocess
+      YOUTUBE_CREDENTIALS_DIR: /app/youtube_credentials
+    volumes:
+      - storage_data:/data/storage
+      - ./YouTubeManager/credentials:/app/youtube_credentials
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - vp_internal
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vp_frontend
+    ports:
+      - "3001:80"
+    depends_on:
+      - api
+    networks:
+      - vp_internal
+
+volumes:
+  pg_data:
+  redis_data:
+  minio_data:
+  storage_data:
+
+networks:
+  vp_internal:
+    driver: bridge
