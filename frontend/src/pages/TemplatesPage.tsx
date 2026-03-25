@@ -3,10 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import apiClient from '../api/client';
 import type { Pipeline } from '../api/types';
+import BatchExecuteModal, { buildBatchExample, parseBatchItems } from '../components/batch/BatchExecuteModal';
 
 export default function TemplatesPage() {
   const [templates, setTemplates] = useState<Pipeline[]>([]);
   const [loading, setLoading] = useState(true);
+  const [runningBatch, setRunningBatch] = useState(false);
+  const [batchTemplate, setBatchTemplate] = useState<Pipeline | null>(null);
+  const [batchInputText, setBatchInputText] = useState('');
+  const [batchInputError, setBatchInputError] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const navigate = useNavigate();
 
   const fetchTemplates = () => {
@@ -29,6 +35,51 @@ export default function TemplatesPage() {
     }
   };
 
+  const openBatchRun = (template: Pipeline) => {
+    setMessage(null);
+    setBatchInputError(null);
+    setBatchTemplate(template);
+    setBatchInputText(JSON.stringify(buildBatchExample(template.definition), null, 2));
+  };
+
+  const closeBatchRun = () => {
+    if (runningBatch) return;
+    setBatchTemplate(null);
+    setBatchInputText('');
+    setBatchInputError(null);
+  };
+
+  const handleBatchRun = async () => {
+    if (!batchTemplate) return;
+
+    let items: Array<Record<string, unknown>>;
+    try {
+      items = parseBatchItems(batchInputText);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Invalid JSON';
+      setBatchInputError(text);
+      return;
+    }
+
+    setRunningBatch(true);
+    setMessage(null);
+    setBatchInputError(null);
+    try {
+      const res = await apiClient.post(`/templates/${batchTemplate.id}/execute/batch`, { items });
+      const count = Array.isArray(res.data) ? res.data.length : items.length;
+      setMessage({ type: 'success', text: `Submitted ${count} jobs` });
+      closeBatchRun();
+      navigate('/jobs');
+    } catch (error) {
+      const detail = axios.isAxiosError(error)
+        ? error.response?.data?.detail
+        : null;
+      setMessage({ type: 'error', text: detail || 'Batch run failed' });
+    } finally {
+      setRunningBatch(false);
+    }
+  };
+
   const handleDeleteTemplate = async (templateId: string, templateName: string) => {
     if (!window.confirm(`Delete template "${templateName}"?`)) {
       return;
@@ -48,6 +99,19 @@ export default function TemplatesPage() {
   return (
     <div style={{ padding: 24, color: '#e2e8f0', overflowY: 'auto', height: '100%' }}>
       <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>Templates</h1>
+      {message && (
+        <div style={{
+          marginBottom: 16,
+          padding: '10px 12px',
+          borderRadius: 8,
+          backgroundColor: message.type === 'success' ? '#052e16' : '#450a0a',
+          color: message.type === 'success' ? '#86efac' : '#fca5a5',
+          border: `1px solid ${message.type === 'success' ? '#166534' : '#7f1d1d'}`,
+          fontSize: 13,
+        }}>
+          {message.text}
+        </div>
+      )}
 
       {loading ? (
         <div style={{ color: '#94a3b8' }}>Loading...</div>
@@ -103,6 +167,21 @@ export default function TemplatesPage() {
                   Use Template
                 </button>
                 <button
+                  onClick={() => openBatchRun(tpl)}
+                  style={{
+                    padding: '6px 16px',
+                    backgroundColor: '#0f766e',
+                    color: '#ccfbf1',
+                    border: '1px solid #115e59',
+                    borderRadius: 6,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    fontWeight: 500,
+                  }}
+                >
+                  Batch Run
+                </button>
+                <button
                   onClick={() => void handleDeleteTemplate(tpl.id, tpl.name)}
                   style={{
                     padding: '6px 16px',
@@ -121,6 +200,19 @@ export default function TemplatesPage() {
             </div>
           ))}
         </div>
+      )}
+
+      {batchTemplate && (
+        <BatchExecuteModal
+          title={batchTemplate.name}
+          description="Submit a JSON array of parameter dictionaries to the template batch API."
+          value={batchInputText}
+          submitting={runningBatch}
+          error={batchInputError}
+          onChange={setBatchInputText}
+          onClose={closeBatchRun}
+          onSubmit={() => void handleBatchRun()}
+        />
       )}
     </div>
   );

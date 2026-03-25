@@ -11,8 +11,7 @@ import ProcessNode from '../components/editor/ProcessNode';
 import NodePalette from '../components/editor/NodePalette';
 import ConfigPanel from '../components/editor/ConfigPanel';
 import EditorToolbar from '../components/editor/EditorToolbar';
-
-let nodeIdCounter = 0;
+import { createEditorNode } from '../utils/editorNodes';
 
 export default function EditorPage() {
   const { pipelineId: routePipelineId } = useParams<{ pipelineId?: string }>();
@@ -51,19 +50,11 @@ export default function EditorPage() {
   }, [routePipelineId, setPipeline, clear]);
 
   const handleAddNode = useCallback((typeName: string) => {
-    const typeDef = nodeTypes.find(t => t.type_name === typeName);
-    nodeIdCounter++;
-    const id = `node_${Date.now()}_${nodeIdCounter}`;
-    addNode({
-      id,
-      type: 'processNode',
-      position: { x: 250 + Math.random() * 200, y: 100 + Math.random() * 200 },
-      data: {
-        label: typeDef?.display_name || typeName,
-        config: {},
-        nodeType: typeName,
-      },
-    });
+    addNode(createEditorNode(
+      typeName,
+      nodeTypes,
+      { x: 250 + Math.random() * 200, y: 100 + Math.random() * 200 },
+    ));
   }, [nodeTypes, addNode]);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -76,10 +67,6 @@ export default function EditorPage() {
     const typeName = e.dataTransfer.getData('application/reactflow-type');
     if (!typeName) return;
 
-    const typeDef = nodeTypes.find(t => t.type_name === typeName);
-    nodeIdCounter++;
-    const id = `node_${Date.now()}_${nodeIdCounter}`;
-
     // Get position relative to the React Flow canvas
     const bounds = reactFlowWrapper.current?.getBoundingClientRect();
     const position = {
@@ -87,16 +74,7 @@ export default function EditorPage() {
       y: e.clientY - (bounds?.top || 0),
     };
 
-    addNode({
-      id,
-      type: 'processNode',
-      position,
-      data: {
-        label: typeDef?.display_name || typeName,
-        config: {},
-        nodeType: typeName,
-      },
-    });
+    addNode(createEditorNode(typeName, nodeTypes, position));
   }, [nodeTypes, addNode]);
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: { id: string }) => {

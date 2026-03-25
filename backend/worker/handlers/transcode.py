@@ -4,7 +4,7 @@ from worker.handlers.base import BaseHandler
 class TranscodeHandler(BaseHandler):
     async def execute(self, node_config, input_paths, output_path):
         video = input_paths["input"]
-        video_codec = node_config.get("video_codec", "libx264")
+        video_codec = self.preferred_video_codec(node_config.get("video_codec", "libx264"))
         audio_codec = node_config.get("audio_codec", "aac")
         resolution = node_config.get("resolution", "")
         bitrate = node_config.get("bitrate", "")
@@ -21,6 +21,9 @@ class TranscodeHandler(BaseHandler):
             if video_codec in ("libx264", "libx265"):
                 args.extend(["-crf", str(int(crf))])
                 args.extend(["-preset", preset])
+            elif video_codec in ("h264_nvenc", "hevc_nvenc"):
+                # Map the existing CRF-style UI to NVENC's constant-quality mode.
+                args.extend(["-rc:v", "vbr", "-cq:v", str(int(crf)), "-preset", preset])
             elif video_codec == "libvpx-vp9":
                 args.extend(["-crf", str(int(crf)), "-b:v", "0"])
 

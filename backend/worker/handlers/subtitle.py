@@ -33,7 +33,7 @@ class SubtitleHandler(BaseHandler):
         args = [
             "-i", video,
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast",
+            *self.build_video_encode_args("libx264", preset="fast", crf=23),
             "-c:a", "copy",
             output_path,
         ]

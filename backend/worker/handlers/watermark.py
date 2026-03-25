@@ -30,7 +30,7 @@ class WatermarkHandler(BaseHandler):
             "-i", image,
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "fast",
+            *self.build_video_encode_args("libx264", preset="fast", crf=23),
             "-c:a", "copy",
             output_path,
         ]

@@ -1,103 +1,32 @@
 from __future__ import annotations
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
-from app.models.artifact import Artifact
 from app.schemas.job import (
     JobCreate, BatchJobCreate, JobResponse, JobDetailResponse, JobListResponse,
-    NodeExecutionResponse,
 )
 from app.services.job_service import (
     create_job, create_job_from_snapshot, get_job, list_jobs, cancel_job, delete_job,
+)
+from app.services.job_runtime import (
+    start_jobs_background,
+    to_job_detail_response,
+    to_job_response,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["jobs"])
 
 
-def _to_response(job) -> JobResponse:
-    return JobResponse(
-        id=str(job.id),
-        pipeline_id=str(job.pipeline_id),
-        status=job.status.value,
-        submitted_at=job.submitted_at,
-        started_at=job.started_at,
-        completed_at=job.completed_at,
-        error_message=job.error_message,
-        submitted_by=job.submitted_by,
-        retry_count=job.retry_count,
-    )
-
-
-async def _load_output_artifacts(db: AsyncSession, job) -> dict[uuid.UUID, Artifact]:
-    artifact_ids = [ne.output_artifact_id for ne in job.node_executions if ne.output_artifact_id]
-    if not artifact_ids:
-        return {}
-
-    result = await db.execute(select(Artifact).where(Artifact.id.in_(artifact_ids)))
-    artifacts = result.scalars().all()
-    return {artifact.id: artifact for artifact in artifacts}
-
-
-async def _to_detail(db: AsyncSession, job) -> JobDetailResponse:
-    artifacts_by_id = await _load_output_artifacts(db, job)
-    return JobDetailResponse(
-        id=str(job.id),
-        pipeline_id=str(job.pipeline_id),
-        status=job.status.value,
-        submitted_at=job.submitted_at,
-        started_at=job.started_at,
-        completed_at=job.completed_at,
-        error_message=job.error_message,
-        submitted_by=job.submitted_by,
-        retry_count=job.retry_count,
-        pipeline_snapshot=job.pipeline_snapshot,
-        execution_plan=job.execution_plan,
-        node_executions=[
-            NodeExecutionResponse(
-                id=str(ne.id),
-                node_id=ne.node_id,
-                node_type=ne.node_type,
-                node_label=ne.node_label,
-                status=ne.status.value,
-                progress=ne.progress,
-                worker_id=ne.worker_id,
-                queued_at=ne.queued_at,
-                started_at=ne.started_at,
-                completed_at=ne.completed_at,
-                error_message=ne.error_message,
-                input_artifact_ids=[str(a) for a in (ne.input_artifact_ids or [])],
-                output_artifact_id=str(ne.output_artifact_id) if ne.output_artifact_id else None,
-                output_artifact_filename=(
-                    artifacts_by_id[ne.output_artifact_id].filename
-                    if ne.output_artifact_id and ne.output_artifact_id in artifacts_by_id
-                    else None
-                ),
-                output_artifact_media_info=(
-                    artifacts_by_id[ne.output_artifact_id].media_info
-                    if ne.output_artifact_id and ne.output_artifact_id in artifacts_by_id
-                    else None
-                ),
-            )
-            for ne in job.node_executions
-        ],
-    )
-
-
 @router.post("/jobs", response_model=JobDetailResponse, status_code=201)
 async def submit_job(data: JobCreate, db: AsyncSession = Depends(get_db)):
     try:
-        job = await create_job(db, uuid.UUID(data.pipeline_id))
+        job = await create_job(db, uuid.UUID(data.pipeline_id), input_overrides=data.inputs)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Start execution asynchronously (don't block the response)
-    import asyncio
-    from app.orchestrator.engine import engine
-    asyncio.create_task(engine.start_job(job.id))
-
-    return await _to_detail(db, job)
+    await start_jobs_background([job.id])
+    return await to_job_detail_response(db, job)
 
 
 @router.get("/jobs", response_model=JobListResponse)
@@ -111,7 +40,7 @@ async def list_all(
     pid = uuid.UUID(pipeline_id) if pipeline_id else None
     items, total = await list_jobs(db, skip, limit, pid, status)
     return JobListResponse(
-        items=[_to_response(j) for j in items],
+        items=[to_job_response(j) for j in items],
         total=total,
     )
 
@@ -121,7 +50,7 @@ async def get_one(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     job = await get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return await _to_detail(db, job)
+    return await to_job_detail_response(db, job)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobDetailResponse)
@@ -129,15 +58,12 @@ async def cancel(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     job = await cancel_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return await _to_detail(db, job)
+    return await to_job_detail_response(db, job)
 
 
 @router.post("/jobs/batch", response_model=list[JobDetailResponse], status_code=201)
 async def submit_batch(data: BatchJobCreate, db: AsyncSession = Depends(get_db)):
     """Submit multiple jobs for the same pipeline with different inputs."""
-    import asyncio
-    from app.orchestrator.engine import engine
-
     jobs = []
     for input_overrides in data.inputs:
         try:
@@ -146,11 +72,8 @@ async def submit_batch(data: BatchJobCreate, db: AsyncSession = Depends(get_db))
             raise HTTPException(status_code=400, detail=str(e))
         jobs.append(job)
 
-    # Start all jobs
-    for job in jobs:
-        asyncio.create_task(engine.start_job(job.id))
-
-    return [await _to_detail(db, j) for j in jobs]
+    await start_jobs_background(job.id for job in jobs)
+    return [await to_job_detail_response(db, job) for job in jobs]
 
 
 @router.post("/jobs/{job_id}/rerun", response_model=JobDetailResponse, status_code=201)
@@ -165,11 +88,8 @@ async def rerun(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    import asyncio
-    from app.orchestrator.engine import engine
-    asyncio.create_task(engine.start_job(new_job.id))
-
-    return await _to_detail(db, new_job)
+    await start_jobs_background([new_job.id])
+    return await to_job_detail_response(db, new_job)
 
 
 @router.delete("/jobs/{job_id}", status_code=200)

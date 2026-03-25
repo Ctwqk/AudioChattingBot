@@ -100,6 +100,23 @@ services:
     networks:
       - vp_internal
 
+  youtube-manager:
+    build:
+      context: ./YouTubeManager
+      dockerfile: Dockerfile
+    container_name: vp_youtube_manager
+    environment:
+      GOOGLE_CLIENT_SECRETS_FILE: /app/credentials/client_secret_62449607041-mn44n8pmkl9pc6tdah7bmd67tid3qgc5.apps.googleusercontent.com.json
+      DOWNLOAD_DIR: /app/downloads
+      OAUTH_REDIRECT_URI: http://localhost:3001/youtube/api/auth/callback
+    volumes:
+      - ./YouTubeManager/downloads:/app/downloads
+      - ./YouTubeManager/credentials:/app/credentials
+    ports:
+      - "8899:8899"
+    networks:
+      - vp_internal
+
   frontend:
     build:
       context: ./frontend
@@ -109,9 +126,9 @@ services:
       - "3001:80"
     depends_on:
       - api
+      - youtube-manager
     networks:
       - vp_internal
-      - youtube_bridge
 
 volumes:
   pg_data:
@@ -122,6 +139,3 @@ volumes:
 networks:
   vp_internal:
     driver: bridge
-  youtube_bridge:
-    external: true
-    name: videoprocess_net

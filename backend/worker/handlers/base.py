@@ -3,8 +3,7 @@ import abc
 import asyncio
 import logging
 import os
-import uuid
-from pathlib import Path
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +39,164 @@ class BaseHandler(abc.ABC):
             except ProcessLookupError:
                 pass
 
+    def gpu_enabled(self) -> bool:
+        value = os.environ.get("VIDEO_USE_GPU", "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def gpu_fallback_enabled(self) -> bool:
+        value = os.environ.get("VIDEO_GPU_FALLBACK_TO_CPU", "true").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def gpu_busy_util_threshold(self) -> int:
+        return int(os.environ.get("VIDEO_GPU_BUSY_UTIL_THRESHOLD", "90"))
+
+    def gpu_busy_mem_threshold(self) -> int:
+        return int(os.environ.get("VIDEO_GPU_BUSY_MEM_THRESHOLD", "92"))
+
+    def preferred_video_codec(self, codec: str | None = None) -> str:
+        selected = codec or "libx264"
+        if not self.gpu_enabled():
+            return selected
+
+        codec_map = {
+            "libx264": "h264_nvenc",
+            "libx265": "hevc_nvenc",
+        }
+        return codec_map.get(selected, selected)
+
+    def build_video_encode_args(
+        self,
+        codec: str | None = None,
+        *,
+        preset: str = "fast",
+        crf: int | None = None,
+        bitrate: str = "",
+    ) -> list[str]:
+        selected = self.preferred_video_codec(codec)
+        args = ["-c:v", selected]
+
+        if selected in ("libx264", "libx265"):
+            if crf is not None:
+                args.extend(["-crf", str(int(crf))])
+            args.extend(["-preset", preset])
+        elif selected in ("h264_nvenc", "hevc_nvenc"):
+            if crf is not None:
+                args.extend(["-rc:v", "vbr", "-cq:v", str(int(crf))])
+            args.extend(["-preset", preset])
+
+        if bitrate:
+            args.extend(["-b:v", bitrate])
+
+        return args
+
+    def _contains_nvenc(self, args: list[str]) -> bool:
+        return any(token in {"h264_nvenc", "hevc_nvenc"} for token in args)
+
+    def _cpu_codec_for(self, codec: str) -> str:
+        return {
+            "h264_nvenc": "libx264",
+            "hevc_nvenc": "libx265",
+        }.get(codec, codec)
+
+    def _rewrite_nvenc_args_for_cpu(self, args: list[str]) -> list[str]:
+        rewritten: list[str] = []
+        removed_cq: str | None = None
+        has_crf = False
+        i = 0
+        while i < len(args):
+            token = args[i]
+            nxt = args[i + 1] if i + 1 < len(args) else None
+
+            if token == "-c:v" and nxt is not None:
+                rewritten.extend([token, self._cpu_codec_for(nxt)])
+                i += 2
+                continue
+            if token == "-crf" and nxt is not None:
+                has_crf = True
+                rewritten.extend([token, nxt])
+                i += 2
+                continue
+            if token == "-cq:v" and nxt is not None:
+                removed_cq = nxt
+                i += 2
+                continue
+            if token == "-rc:v" and nxt is not None:
+                i += 2
+                continue
+
+            rewritten.append(token)
+            i += 1
+
+        if removed_cq is not None and not has_crf:
+            insert_at = len(rewritten) - 1 if rewritten and not rewritten[-1].startswith("-") else len(rewritten)
+            rewritten[insert_at:insert_at] = ["-crf", removed_cq]
+
+        return rewritten
+
+    async def _gpu_looks_busy(self) -> bool:
+        if not self.gpu_enabled() or not self.gpu_fallback_enabled():
+            return False
+        if shutil.which("nvidia-smi") is None:
+            return False
+
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-gpu=utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return False
+
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) != 3:
+                continue
+            try:
+                util = int(parts[0])
+                mem_used = int(parts[1])
+                mem_total = int(parts[2])
+            except ValueError:
+                continue
+
+            mem_pct = (mem_used / mem_total * 100) if mem_total else 0
+            if util >= self.gpu_busy_util_threshold() or mem_pct >= self.gpu_busy_mem_threshold():
+                logger.warning(
+                    "GPU looks busy (util=%s%%, mem=%s/%s MiB); falling back to CPU encoding",
+                    util,
+                    mem_used,
+                    mem_total,
+                )
+                return True
+
+        return False
+
+    def _is_gpu_capacity_error(self, stderr_text: str) -> bool:
+        lowered = stderr_text.lower()
+        indicators = (
+            "openencodesessionex failed",
+            "no nvenc capable devices found",
+            "device busy",
+            "resource temporarily unavailable",
+            "cannot init cuda",
+            "cuda_error_out_of_memory",
+            "out of memory",
+            "nvenc",
+        )
+        return any(indicator in lowered for indicator in indicators)
+
     async def run_ffmpeg(self, args: list[str]) -> str:
         """Run an ffmpeg command and return stderr output."""
         if self._cancelled:
             raise CancelledError("Node cancelled before ffmpeg started")
 
-        cmd = ["ffmpeg", "-y", "-hide_banner"] + args
+        ffmpeg_args = args
+        if self._contains_nvenc(ffmpeg_args) and await self._gpu_looks_busy():
+            ffmpeg_args = self._rewrite_nvenc_args_for_cpu(ffmpeg_args)
+
+        cmd = ["ffmpeg", "-y", "-hide_banner"] + ffmpeg_args
         logger.info(f"Running: {' '.join(cmd)}")
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -58,6 +209,14 @@ class BaseHandler(abc.ABC):
         if self._cancelled:
             raise CancelledError("Node cancelled during ffmpeg execution")
         if self._proc.returncode != 0:
+            if (
+                ffmpeg_args is args
+                and self._contains_nvenc(ffmpeg_args)
+                and self.gpu_fallback_enabled()
+                and self._is_gpu_capacity_error(stderr_text)
+            ):
+                logger.warning("GPU ffmpeg run failed with a GPU-capacity error; retrying on CPU")
+                return await self.run_ffmpeg(self._rewrite_nvenc_args_for_cpu(args))
             raise RuntimeError(f"ffmpeg failed (exit {self._proc.returncode}):\n{stderr_text[-2000:]}")
         return stderr_text
 

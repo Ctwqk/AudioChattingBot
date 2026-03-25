@@ -46,6 +46,8 @@ class ConcatTimelineHandler(BaseHandler):
                 "-i", second,
                 "-filter_complex", filter_complex,
                 "-map", "[v]", "-map", "[a]",
+                *self.build_video_encode_args("libx264", preset="fast", crf=23),
+                "-c:a", "aac",
                 output_path,
             ]
             try:
@@ -61,6 +63,7 @@ class ConcatTimelineHandler(BaseHandler):
                     "-i", second,
                     "-filter_complex", filter_complex,
                     "-map", "[v]",
+                    *self.build_video_encode_args("libx264", preset="fast", crf=23),
                     output_path,
                 ]
                 await self.run_ffmpeg(args)

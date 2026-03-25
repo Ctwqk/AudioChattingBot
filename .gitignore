@@ -53,6 +53,8 @@ frontend/dist/
 pg_data/
 redis_data/
 minio_data/
+k8s-data/
+.playwright-cli/
 
 # Credentials / secrets
 **/credentials/

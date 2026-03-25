@@ -1,16 +1,33 @@
 from __future__ import annotations
 import uuid
 from datetime import datetime
-from pydantic import BaseModel
+from typing import Any
+from pydantic import BaseModel, Field
 
 
-class JobCreate(BaseModel):
+class InputOverridesRequest(BaseModel):
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchInputOverridesRequest(BaseModel):
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class JobCreate(InputOverridesRequest):
     pipeline_id: str
 
 
 class BatchJobCreate(BaseModel):
     pipeline_id: str
-    inputs: list[dict]  # list of per-job input overrides, e.g. [{"asset_id": "..."}, ...]
+    inputs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TemplateExecuteRequest(InputOverridesRequest):
+    pass
+
+
+class TemplateBatchExecuteRequest(BatchInputOverridesRequest):
+    pass
 
 
 class NodeExecutionResponse(BaseModel):

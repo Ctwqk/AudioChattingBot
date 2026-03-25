@@ -17,7 +17,7 @@ DEFINITION = NodeTypeDefinition(
                        options=["mp4", "mkv", "webm", "avi", "mov"],
                        description="Output container format"),
         ParamDefinition(name="video_codec", param_type="select", default="libx264",
-                       options=["libx264", "libx265", "libvpx-vp9", "copy"],
+                       options=["libx264", "libx265", "h264_nvenc", "hevc_nvenc", "libvpx-vp9", "copy"],
                        description="Video codec"),
         ParamDefinition(name="audio_codec", param_type="select", default="aac",
                        options=["aac", "libopus", "libmp3lame", "copy"],

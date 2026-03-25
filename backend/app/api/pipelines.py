@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
+from app.schemas.job import TemplateExecuteRequest, TemplateBatchExecuteRequest, JobDetailResponse
 from app.schemas.pipeline import (
     PipelineCreate, PipelineUpdate, PipelineResponse, PipelineListResponse,
     PipelineDefinition, ValidationResult,
@@ -11,6 +12,8 @@ from app.services.pipeline_service import (
     create_pipeline, get_pipeline, list_pipelines, update_pipeline,
     delete_pipeline, duplicate_pipeline, validate_definition,
 )
+from app.services.job_service import create_job
+from app.services.job_runtime import start_jobs_background, to_job_detail_response
 
 router = APIRouter(prefix="/api/v1", tags=["pipelines"])
 
@@ -105,3 +108,44 @@ async def duplicate(pipeline_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 async def validate(definition: PipelineDefinition):
     result = validate_definition(definition)
     return result
+
+
+@router.post("/templates/{pipeline_id}/execute", response_model=JobDetailResponse, status_code=201)
+async def execute_template(
+    pipeline_id: uuid.UUID,
+    data: TemplateExecuteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    pipeline = await get_pipeline(db, pipeline_id)
+    if not pipeline or not pipeline.is_template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        job = await create_job(db, pipeline_id, input_overrides=data.inputs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await start_jobs_background([job.id])
+    return await to_job_detail_response(db, job)
+
+
+@router.post("/templates/{pipeline_id}/execute/batch", response_model=list[JobDetailResponse], status_code=201)
+async def execute_template_batch(
+    pipeline_id: uuid.UUID,
+    data: TemplateBatchExecuteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    pipeline = await get_pipeline(db, pipeline_id)
+    if not pipeline or not pipeline.is_template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    jobs = []
+    for item in data.items:
+        try:
+            job = await create_job(db, pipeline_id, input_overrides=item)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        jobs.append(job)
+
+    await start_jobs_background(job.id for job in jobs)
+    return [await to_job_detail_response(db, job) for job in jobs]

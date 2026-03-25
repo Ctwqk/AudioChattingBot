@@ -89,6 +89,28 @@ def create_test_video() -> Path:
     return video_path
 
 
+def probe_duration(file_path: Path) -> float:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(file_path),
+    ]
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return float(result.stdout.strip())
+
+
+def download_artifact_file(artifact_id: str, filename: str) -> Path:
+    target = TMP_DIR / filename
+    response = request("GET", f"{API_BASE}/artifacts/{artifact_id}/download", expected=200)
+    target.write_bytes(response.content)
+    return target
+
+
 def wait_for_job(job_id: str, *, timeout_seconds: int = 120) -> dict:
     deadline = time.time() + timeout_seconds
     last = None
@@ -306,7 +328,18 @@ def run_backend_smoke(results: list[dict], cleanup: dict) -> None:
     templates = json_request("GET", f"{API_BASE}/templates", expected=200)
     expect(results, "list templates", any(item["id"] == pipeline["id"] for item in templates["items"]), pipeline["id"])
 
-    job = json_request("POST", f"{API_BASE}/jobs", expected=201, json={"pipeline_id": pipeline["id"]})
+    job = json_request(
+        "POST",
+        f"{API_BASE}/jobs",
+        expected=201,
+        json={
+            "pipeline_id": pipeline["id"],
+            "inputs": {
+                "src": {"asset_id": asset["id"]},
+                "trim": {"start_time": "00:00:00", "duration": "2"},
+            },
+        },
+    )
     cleanup["jobs"].append(job["id"])
     expect(results, "submit job", job["status"] in {"PENDING", "PLANNING", "RUNNING", "SUCCEEDED"})
 
@@ -321,6 +354,9 @@ def run_backend_smoke(results: list[dict], cleanup: dict) -> None:
     trim_artifact_id = next(node for node in detail["node_executions"] if node["node_id"] == "trim")["output_artifact_id"]
     final_artifact_id = next(node for node in detail["node_executions"] if node["node_id"] == "trans")["output_artifact_id"]
     expect(results, "job produced artifacts", bool(trim_artifact_id and final_artifact_id), json.dumps(detail["node_executions"]))
+    rendered_path = download_artifact_file(final_artifact_id, f"job-{job['id']}.mp4")
+    rendered_duration = probe_duration(rendered_path)
+    expect(results, "job input overrides applied", rendered_duration >= 1.8, f"duration={rendered_duration}")
 
     artifact = json_request("GET", f"{API_BASE}/artifacts/{trim_artifact_id}", expected=200)
     expect(results, "get artifact", artifact["id"] == trim_artifact_id)
@@ -346,6 +382,74 @@ def run_backend_smoke(results: list[dict], cleanup: dict) -> None:
     for batch_job in batch_jobs:
         batch_detail = wait_for_job(batch_job["id"])
         expect(results, f"batch job {batch_job['id'][:8]}", batch_detail["status"] == "SUCCEEDED", batch_detail["status"])
+
+    template_job = json_request(
+        "POST",
+        f"{API_BASE}/templates/{pipeline['id']}/execute",
+        expected=201,
+        json={
+            "inputs": {
+                "src.asset_id": asset["id"],
+                "trim.start_time": "00:00:00",
+                "trim.duration": "1",
+            }
+        },
+    )
+    cleanup["jobs"].append(template_job["id"])
+    expect(results, "template execute", template_job["status"] in {"PENDING", "PLANNING", "RUNNING", "SUCCEEDED"})
+    template_detail = wait_for_job(template_job["id"])
+    expect(results, "template execute terminal", template_detail["status"] == "SUCCEEDED", template_detail["status"])
+    template_final_artifact_id = next(
+        node for node in template_detail["node_executions"] if node["node_id"] == "trans"
+    )["output_artifact_id"]
+    template_path = download_artifact_file(template_final_artifact_id, f"template-{template_job['id']}.mp4")
+    template_duration = probe_duration(template_path)
+    expect(results, "template execute overrides applied", 0.8 <= template_duration <= 1.3, f"duration={template_duration}")
+
+    template_batch_jobs = json_request(
+        "POST",
+        f"{API_BASE}/templates/{pipeline['id']}/execute/batch",
+        expected=201,
+        json={
+            "items": [
+                {
+                    "src.asset_id": asset["id"],
+                    "trim.start_time": "00:00:00",
+                    "trim.duration": "1",
+                },
+                {
+                    "src": {"asset_id": asset["id"]},
+                    "trim": {"start_time": "00:00:00", "duration": "2"},
+                },
+            ]
+        },
+    )
+    cleanup["jobs"].extend(job["id"] for job in template_batch_jobs)
+    expect(results, "template execute batch", len(template_batch_jobs) == 2, str(len(template_batch_jobs)))
+    expected_ranges = [(0.8, 1.3), (1.8, 2.3)]
+    for index, template_batch_job in enumerate(template_batch_jobs):
+        template_batch_detail = wait_for_job(template_batch_job["id"])
+        expect(
+            results,
+            f"template batch terminal {index + 1}",
+            template_batch_detail["status"] == "SUCCEEDED",
+            template_batch_detail["status"],
+        )
+        template_batch_artifact_id = next(
+            node for node in template_batch_detail["node_executions"] if node["node_id"] == "trans"
+        )["output_artifact_id"]
+        template_batch_path = download_artifact_file(
+            template_batch_artifact_id,
+            f"template-batch-{index + 1}-{template_batch_job['id']}.mp4",
+        )
+        template_batch_duration = probe_duration(template_batch_path)
+        min_duration, max_duration = expected_ranges[index]
+        expect(
+            results,
+            f"template batch override applied {index + 1}",
+            min_duration <= template_batch_duration <= max_duration,
+            f"duration={template_batch_duration}",
+        )
 
     rerun = json_request("POST", f"{API_BASE}/jobs/{job['id']}/rerun", expected=201)
     cleanup["jobs"].append(rerun["id"])

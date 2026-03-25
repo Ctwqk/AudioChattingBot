@@ -1,5 +1,6 @@
 from __future__ import annotations
 import uuid
+from typing import Any
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,32 +10,86 @@ from app.schemas.pipeline import PipelineDefinition
 from app.orchestrator.dag import validate_pipeline
 
 
+def _set_nested_value(target: dict[str, Any], path: str, value: Any) -> None:
+    if "." not in path:
+        target[path] = value
+        return
+
+    current = target
+    parts = path.split(".")
+    for part in parts[:-1]:
+        existing = current.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            current[part] = existing
+        current = existing
+    current[parts[-1]] = value
+
+
+def _merge_override_dict(target: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    for key, value in override.items():
+        if isinstance(value, dict) and "." not in key:
+            existing = target.get(key)
+            nested = dict(existing) if isinstance(existing, dict) else {}
+            target[key] = _merge_override_dict(nested, value)
+            continue
+        _set_nested_value(target, key, value)
+    return target
+
+
+def _normalize_node_overrides(input_overrides: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    node_overrides: dict[str, dict[str, Any]] = {}
+
+    for key, value in input_overrides.items():
+        if key == "asset_id":
+            continue
+
+        if "." in key and not isinstance(value, dict):
+            node_id, param_name = key.split(".", 1)
+            bucket = node_overrides.setdefault(node_id, {})
+            _set_nested_value(bucket, param_name, value)
+            continue
+
+        if isinstance(value, dict):
+            bucket = node_overrides.setdefault(key, {})
+            _merge_override_dict(bucket, value)
+            continue
+
+        bucket = node_overrides.setdefault(key, {})
+        bucket["asset_id"] = value
+
+    return node_overrides
+
+
 def _apply_input_overrides(
     definition: PipelineDefinition,
-    input_overrides: dict | None = None,
+    input_overrides: dict[str, Any] | None = None,
 ) -> PipelineDefinition:
     if not input_overrides:
         return definition
 
     data = definition.model_dump()
+    node_overrides = _normalize_node_overrides(input_overrides)
     top_level_asset_applied = False
 
     for node in data["nodes"]:
-        if node["type"] != "source":
-            continue
-
         config = dict(node["data"].get("config") or {})
-        if node["id"] in input_overrides:
-            override_value = input_overrides[node["id"]]
-            if isinstance(override_value, dict):
-                config.update(override_value)
-            else:
-                config["asset_id"] = override_value
-        elif "asset_id" in input_overrides and not top_level_asset_applied:
+
+        node_override = node_overrides.get(node["id"])
+        if node_override:
+            _merge_override_dict(config, dict(node_override))
+
+        if (
+            node["type"] == "source"
+            and "asset_id" in input_overrides
+            and not top_level_asset_applied
+        ):
             config["asset_id"] = input_overrides["asset_id"]
             top_level_asset_applied = True
 
         node["data"]["config"] = config
+        if "asset_id" in config:
+            node["data"]["asset_id"] = config["asset_id"]
 
     return PipelineDefinition.model_validate(data)
 
@@ -81,12 +136,15 @@ async def _create_job_from_definition(
 async def create_job(
     db: AsyncSession,
     pipeline_id: uuid.UUID,
-    input_overrides: dict | None = None,
+    input_overrides: dict[str, Any] | None = None,
 ) -> Job:
     """Create a new job from a pipeline. Does NOT start execution - that's the orchestrator's job.
 
-    input_overrides: optional dict to override source node configs for batch jobs.
-        Keys can be node_id or "asset_id" (applied to the first source node).
+    input_overrides: optional dict to override node configs before the job snapshot is created.
+        Supported forms:
+        - {"asset_id": "..."} for legacy first-source override
+        - {"src": {"asset_id": "..."}, "trim": {"start_time": "00:00:01"}}
+        - {"src.asset_id": "...", "trim.start_time": "00:00:01"}
     """
     pipeline = await db.get(Pipeline, pipeline_id)
     if not pipeline:
