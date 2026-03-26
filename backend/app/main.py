@@ -73,10 +73,14 @@ async def _recover_stale_jobs():
         stale_jobs = list(result.scalars().all())
 
         for job in stale_jobs:
-            await _prepare_job_for_recovery(db, job)
+            changed = await _prepare_job_for_recovery(db, job)
+            if not changed:
+                await engine._maybe_finalize_job(db, job)
         await db.commit()
 
     for job in stale_jobs:
+        if job.status not in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PLANNING):
+            continue
         logger.info(f"Recovering stale job {job.id} (status={job.status.value})")
         asyncio.create_task(engine.start_job(job.id))
 
@@ -129,6 +133,9 @@ def create_app() -> FastAPI:
 
     from app.api.jobs import router as jobs_router
     app.include_router(jobs_router)
+
+    from app.api.llm import router as llm_router
+    app.include_router(llm_router)
 
     @app.get("/health")
     async def health():

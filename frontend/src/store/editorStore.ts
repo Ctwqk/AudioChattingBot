@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import {
   type Node,
   type Edge,
@@ -30,7 +31,7 @@ interface EditorState {
   clear: () => void;
 }
 
-const useEditorStore = create<EditorState>((set, get) => ({
+const useEditorStore = create<EditorState>()(persist((set, get) => ({
   nodes: [],
   edges: [],
   selectedNodeId: null,
@@ -119,6 +120,17 @@ const useEditorStore = create<EditorState>((set, get) => ({
     pipelineId: null,
     pipelineName: 'Untitled Pipeline',
     isDirty: false,
+  }),
+}), {
+  name: 'videoprocess-editor-draft',
+  storage: createJSONStorage(() => sessionStorage),
+  partialize: (state) => ({
+    nodes: state.nodes,
+    edges: state.edges,
+    selectedNodeId: state.selectedNodeId,
+    pipelineId: state.pipelineId,
+    pipelineName: state.pipelineName,
+    isDirty: state.isDirty,
   }),
 }));
 

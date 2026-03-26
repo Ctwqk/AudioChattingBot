@@ -40,7 +40,15 @@ export default function JobsPage() {
   };
 
   return (
-    <div style={{ padding: 24, color: '#e2e8f0', overflowY: 'auto', height: '100%' }}>
+    <div
+      style={{
+        padding: 24,
+        color: '#e2e8f0',
+        overflowY: 'auto',
+        height: '100%',
+        backgroundColor: '#020617',
+      }}
+    >
       <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>Jobs</h1>
 
       {loading ? (

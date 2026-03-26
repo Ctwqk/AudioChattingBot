@@ -1,9 +1,37 @@
 from __future__ import annotations
 from collections import defaultdict, deque
+from app.orchestrator.planner import (
+    SEARCH_RESULTS_HANDLE,
+    URL_INPUT_HANDLE,
+    get_zip_channel_count,
+    is_planner_node_type,
+    is_zip_input_handle,
+    is_zip_output_handle,
+)
 from app.schemas.pipeline import (
     PipelineDefinition, ValidationError, ValidationWarning, ValidationResult,
 )
+from app.node_registry.base import PortType
 from app.node_registry.registry import NodeTypeRegistry
+
+
+def _infer_actual_output_port_type(node) -> PortType | None:
+    if node.type == "source":
+        media_type = str(node.data.config.get("media_type") or "").strip().lower()
+        return {
+            "video": PortType.VIDEO,
+            "audio": PortType.AUDIO,
+            "image": PortType.IMAGE,
+            "subtitle": PortType.SUBTITLE,
+        }.get(media_type)
+
+    if node.type == "url_download":
+        download_format = str(node.data.config.get("format") or "").strip().lower()
+        if download_format == "audio_only":
+            return PortType.AUDIO
+        return PortType.VIDEO
+
+    return None
 
 
 def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
@@ -13,6 +41,15 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
     registry = NodeTypeRegistry.get()
 
     nodes_by_id = {n.id: n for n in definition.nodes}
+    planner_bound_url_nodes = {
+        edge.target
+        for edge in definition.edges
+        if nodes_by_id.get(edge.source)
+        and nodes_by_id.get(edge.target)
+        and nodes_by_id[edge.source].type == "zip_records"
+        and nodes_by_id[edge.target].type == "url_download"
+        and edge.targetHandle == URL_INPUT_HANDLE
+    }
 
     # 1. Check all node types exist
     for node in definition.nodes:
@@ -74,6 +111,30 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
         if not src_node or not tgt_node:
             continue
 
+        if src_node.type == "youtube_search" or tgt_node.type == "zip_records" or src_node.type == "zip_records":
+            planner_valid = False
+            if src_node.type == "youtube_search" and tgt_node.type == "zip_records":
+                channel_count = get_zip_channel_count(tgt_node.data.config)
+                planner_valid = (
+                    edge.sourceHandle == SEARCH_RESULTS_HANDLE
+                    and is_zip_input_handle(edge.targetHandle, channel_count)
+                )
+            elif src_node.type == "zip_records" and tgt_node.type == "url_download":
+                channel_count = get_zip_channel_count(src_node.data.config)
+                planner_valid = (
+                    is_zip_output_handle(edge.sourceHandle, channel_count)
+                    and edge.targetHandle == URL_INPUT_HANDLE
+                )
+            if not planner_valid:
+                errors.append(ValidationError(
+                    type="port_type_mismatch",
+                    edge_id=edge.id,
+                    source_port=edge.sourceHandle,
+                    target_port=edge.targetHandle,
+                    message=f"Invalid planner connection '{edge.sourceHandle}' -> '{edge.targetHandle}'",
+                ))
+            continue
+
         if not registry.validate_edge(
             source_type=src_node.type,
             source_port=edge.sourceHandle,
@@ -87,6 +148,28 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
                 target_port=edge.targetHandle,
                 message=f"Cannot connect '{edge.sourceHandle}' to '{edge.targetHandle}' (type mismatch)",
             ))
+            continue
+
+        actual_source_type = _infer_actual_output_port_type(src_node)
+        target_type_def = registry.get_type(tgt_node.type)
+        if actual_source_type and target_type_def:
+            target_port_def = next((p for p in target_type_def.inputs if p.name == edge.targetHandle), None)
+            if (
+                target_port_def
+                and target_port_def.port_type != PortType.ANY_MEDIA
+                and actual_source_type != target_port_def.port_type
+            ):
+                errors.append(ValidationError(
+                    type="port_type_mismatch",
+                    edge_id=edge.id,
+                    source_port=edge.sourceHandle,
+                    target_port=edge.targetHandle,
+                    message=(
+                        f"Cannot connect '{src_node.data.label or src_node.type}' "
+                        f"({actual_source_type.value}) to '{tgt_node.data.label or tgt_node.type}' "
+                        f"input '{edge.targetHandle}' ({target_port_def.port_type.value})"
+                    ),
+                ))
 
     # 5. Duplicate input port check + required input check
     connected_inputs: dict[str, set[str]] = defaultdict(set)
@@ -107,6 +190,18 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
         node_def = registry.get_type(node.type)
         if not node_def:
             continue
+        if node.type == "zip_records":
+            channel_count = get_zip_channel_count(node.data.config)
+            for index in range(1, channel_count + 1):
+                handle = f"input_{index}"
+                if handle not in connected_inputs.get(node.id, set()):
+                    errors.append(ValidationError(
+                        type="missing_required_input",
+                        node_id=node.id,
+                        target_port=handle,
+                        message=f"Required input '{handle}' on '{node.data.label or node.type}' is not connected",
+                    ))
+            continue
         for port in node_def.inputs:
             if port.required and port.name not in connected_inputs.get(node.id, set()):
                 errors.append(ValidationError(
@@ -125,6 +220,8 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
     for node in definition.nodes:
         node_def = registry.get_type(node.type)
         if not node_def:
+            continue
+        if is_planner_node_type(node.type):
             continue
         if node_def.outputs and node.id not in has_outgoing and node.type not in terminal_types:
             warnings.append(ValidationWarning(
@@ -154,6 +251,13 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
             value = config.get(param.name)
 
             # Required param missing or empty string
+            if (
+                node.type == "url_download"
+                and param.name == "url"
+                and node.id in planner_bound_url_nodes
+            ):
+                continue
+
             if param.required and (value is None or value == ""):
                 errors.append(ValidationError(
                     type="invalid_param",
@@ -199,6 +303,35 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
                         param_name=param.name,
                         message=f"Parameter '{param.name}' on '{node.data.label or node.type}' must be one of {param.options} (got '{value}')",
                     ))
+
+    # 9. Planner-specific structural checks
+    for node in definition.nodes:
+        if node.type != "zip_records":
+            continue
+
+        channel_count = get_zip_channel_count(node.data.config)
+        outgoing_by_handle: dict[str, list[str]] = defaultdict(list)
+        for edge in definition.edges:
+            if edge.source == node.id:
+                outgoing_by_handle[edge.sourceHandle].append(edge.target)
+
+        for index in range(1, channel_count + 1):
+            handle = f"output_{index}"
+            targets = outgoing_by_handle.get(handle, [])
+            if not targets:
+                errors.append(ValidationError(
+                    type="missing_required_output",
+                    node_id=node.id,
+                    source_port=handle,
+                    message=f"Required output '{handle}' on '{node.data.label or node.type}' is not connected",
+                ))
+            elif len(targets) > 1:
+                errors.append(ValidationError(
+                    type="duplicate_output_port",
+                    node_id=node.id,
+                    source_port=handle,
+                    message=f"Output port '{handle}' on '{node.data.label or node.type}' has multiple connections (only one allowed)",
+                ))
 
     return ValidationResult(
         valid=len(errors) == 0,

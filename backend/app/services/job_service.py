@@ -8,6 +8,7 @@ from app.models.job import Job, JobStatus, NodeExecution, NodeStatus
 from app.models.pipeline import Pipeline
 from app.schemas.pipeline import PipelineDefinition
 from app.orchestrator.dag import validate_pipeline
+from app.orchestrator.planner import compile_runtime_definition
 
 
 def _set_nested_value(target: dict[str, Any], path: str, value: Any) -> None:
@@ -152,7 +153,13 @@ async def create_job(
 
     definition = PipelineDefinition.model_validate(pipeline.definition)
     effective_definition = _apply_input_overrides(definition, input_overrides)
-    return await _create_job_from_definition(db, pipeline_id, effective_definition)
+    validation = validate_pipeline(effective_definition)
+    if not validation.valid:
+        error_msgs = "; ".join(e.message for e in validation.errors)
+        raise ValueError(f"Pipeline validation failed: {error_msgs}")
+
+    runtime_definition = compile_runtime_definition(effective_definition)
+    return await _create_job_from_definition(db, pipeline_id, runtime_definition)
 
 
 async def create_job_from_snapshot(

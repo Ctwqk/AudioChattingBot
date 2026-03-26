@@ -33,6 +33,38 @@ def _redis() -> aioredis.Redis:
 class JobEngine:
     """Orchestrates job execution by dispatching nodes to workers via Redis Streams."""
 
+    async def _maybe_finalize_job(self, db: AsyncSession, job: Job) -> bool:
+        """Mark the job terminal once all node executions have reached a terminal state."""
+        statuses = [n.status for n in job.node_executions]
+        active_statuses = {NodeStatus.PENDING, NodeStatus.QUEUED, NodeStatus.RUNNING}
+        if any(status in active_statuses for status in statuses):
+            return False
+
+        has_success = any(status == NodeStatus.SUCCEEDED for status in statuses)
+        has_fail = any(status == NodeStatus.FAILED for status in statuses)
+
+        if all(status == NodeStatus.SUCCEEDED for status in statuses):
+            job.status = JobStatus.SUCCEEDED
+            job.completed_at = datetime.utcnow()
+            await db.commit()
+            await self._mark_final_artifacts(db, job)
+            logger.info(f"Job {job.id} SUCCEEDED")
+            return True
+
+        if has_fail:
+            job.status = JobStatus.PARTIALLY_FAILED if has_success else JobStatus.FAILED
+            if not job.error_message:
+                failed_nodes = [n.node_label or n.node_id for n in job.node_executions if n.status == NodeStatus.FAILED]
+                if failed_nodes:
+                    job.error_message = f"Failed nodes: {', '.join(failed_nodes)}"
+            job.completed_at = datetime.utcnow()
+            await db.commit()
+            await self._mark_final_artifacts(db, job)
+            logger.info(f"Job {job.id} {job.status.value}")
+            return True
+
+        return False
+
     async def start_job(self, job_id: uuid.UUID) -> None:
         """Start executing a job: validate, plan, and dispatch root nodes."""
         async with async_session() as db:
@@ -203,20 +235,8 @@ class JobEngine:
             ne.progress = 100
             await db.commit()
 
-            # Check if all nodes are done
-            statuses = [n.status for n in job.node_executions]
-            if all(s == NodeStatus.SUCCEEDED for s in statuses):
-                job.status = JobStatus.SUCCEEDED
-                job.completed_at = datetime.utcnow()
-                await db.commit()
-                # Mark final artifacts
-                await self._mark_final_artifacts(db, job)
-                logger.info(f"Job {job_id} SUCCEEDED")
+            if await self._maybe_finalize_job(db, job):
                 return
-
-            if any(s == NodeStatus.FAILED for s in statuses):
-                # Some failed but others succeeded - check if we can still progress
-                pass
 
             # Dispatch newly ready downstream nodes
             dep_map = job.execution_plan.get("dependencies", {}) if job.execution_plan else {}
@@ -289,22 +309,9 @@ class JobEngine:
             dep_map = job.execution_plan.get("dependencies", {}) if job.execution_plan else {}
             await self._skip_downstream(db, job, ne.node_id, dep_map)
 
-            # Check if job should be marked as failed
-            statuses = [n.status for n in job.node_executions]
-            pending_or_running = [s for s in statuses if s in (NodeStatus.PENDING, NodeStatus.QUEUED, NodeStatus.RUNNING)]
-            if not pending_or_running:
-                has_success = any(s == NodeStatus.SUCCEEDED for s in statuses)
-                has_fail = any(s == NodeStatus.FAILED for s in statuses)
-                if has_success and has_fail:
-                    job.status = JobStatus.PARTIALLY_FAILED
-                else:
-                    job.status = JobStatus.FAILED
-                job.error_message = f"Node '{ne.node_label}' failed: {error}"
-                job.completed_at = datetime.utcnow()
-                await db.commit()
-                # Mark succeeded terminal node artifacts as FINAL
-                await self._mark_final_artifacts(db, job)
-                logger.info(f"Job {job_id} {job.status.value}")
+            job.error_message = f"Node '{ne.node_label}' failed: {error}"
+            await db.commit()
+            await self._maybe_finalize_job(db, job)
 
     async def _skip_downstream(
         self, db: AsyncSession, job: Job, failed_node_id: str, dep_map: dict

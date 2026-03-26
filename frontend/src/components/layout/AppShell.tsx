@@ -18,8 +18,16 @@ export default function AppShell() {
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(prev => !prev)}
       />
-      <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ flex: 1, overflow: 'hidden' }}>
+      <main
+        style={{
+          flex: 1,
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          backgroundColor: '#020617',
+        }}
+      >
+        <div style={{ flex: 1, overflow: 'hidden', backgroundColor: '#020617' }}>
           <Outlet />
         </div>
       </main>

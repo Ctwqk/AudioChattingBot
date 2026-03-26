@@ -1,24 +1,31 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
 import useEditorStore from '../../store/editorStore';
 import useNodeTypes from '../../hooks/useNodeTypes';
 import apiClient from '../../api/client';
-import type { Asset, ParamDefinition } from '../../api/types';
+import type { Asset, ParamDefinition, PipelineDefinition } from '../../api/types';
+import type { PlannerSearchResult } from '../../utils/plannerBatch';
+import { getZipConnectionSummary } from '../../utils/plannerBatch';
 
-type YouTubeSearchResult = {
-  id: string;
-  title: string;
-  url: string;
-  thumbnail?: string | null;
-  duration?: number | null;
-  channel?: string | null;
-};
+type YouTubeSearchResult = PlannerSearchResult;
+type SourceMediaKind = 'video' | 'audio' | 'subtitle' | 'image';
+
+const SOURCE_MEDIA_OPTIONS: Array<{ value: SourceMediaKind; label: string }> = [
+  { value: 'video', label: 'Video' },
+  { value: 'audio', label: 'Audio' },
+  { value: 'subtitle', label: 'Subtitle' },
+  { value: 'image', label: 'Image' },
+];
 
 export default function ConfigPanel() {
-  const { nodes, selectedNodeId, updateNodeConfig, updateNodeLabel, removeNode } = useEditorStore();
+  const { nodes, edges, selectedNodeId, updateNodeConfig, updateNodeLabel, removeNode } = useEditorStore();
   const { nodeTypes } = useNodeTypes();
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [minimaxModels, setMinimaxModels] = useState<string[]>([]);
+  const [minimaxBlankLabel, setMinimaxBlankLabel] = useState('Select MiniMax model');
+  const [minimaxLoading, setMinimaxLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<YouTubeSearchResult[]>([]);
+  const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [channelFilter, setChannelFilter] = useState('');
@@ -28,40 +35,100 @@ export default function ConfigPanel() {
   const typeDef = node ? nodeTypes.find(t => t.type_name === (node.data.nodeType as string || node.type)) : null;
 
   useEffect(() => {
-    // Load assets for source node picker
-    apiClient.get('/assets').then(res => setAssets(res.data.items || [])).catch(() => {});
+    apiClient.get('/assets?limit=500').then(res => setAssets(res.data.items || [])).catch(() => {});
   }, []);
 
   useEffect(() => {
+    if (node?.data.nodeType !== 'subtitle_translate') {
+      return;
+    }
+
+    let cancelled = false;
+
+    setMinimaxLoading(true);
+    fetch('/api/v1/llm/provider-models?provider_config_id=minimax')
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to load MiniMax models (${response.status})`);
+        }
+        return response.json() as Promise<{ models?: string[]; blank_label?: string }>;
+      })
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setMinimaxModels(Array.isArray(payload.models) ? payload.models.map(String) : []);
+        setMinimaxBlankLabel(payload.blank_label || 'Select MiniMax model');
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setMinimaxModels([]);
+        setMinimaxBlankLabel('Select MiniMax model');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setMinimaxLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [node?.id, node?.data.nodeType]);
+
+  useEffect(() => {
     setSearchResults([]);
+    setSelectedVideoIds([]);
     setSearchError(null);
     setSearchLoading(false);
     setChannelFilter('');
     setDurationFilter('any');
-    if (node?.data.nodeType === 'url_download') {
+
+    if (node?.data.nodeType === 'youtube_search') {
       const nodeConfig = (node.data.config as Record<string, unknown> | undefined) || {};
       setSearchQuery(String(nodeConfig.query || ''));
+      setSearchResults(Array.isArray(nodeConfig.search_results) ? nodeConfig.search_results as YouTubeSearchResult[] : []);
+      setSelectedVideoIds(Array.isArray(nodeConfig.selected_video_ids) ? nodeConfig.selected_video_ids.map(String) : []);
       return;
     }
+
     setSearchQuery('');
-  }, [node?.id, node?.data.nodeType, node?.data.config]);
+  }, [node?.id, node?.data.nodeType]);
 
   if (!node || !typeDef) {
     return (
-      <div style={{
-        width: 280,
-        backgroundColor: '#0f172a',
-        borderLeft: '1px solid #1e293b',
-        padding: 16,
-        color: '#64748b',
-        fontSize: 13,
-      }}>
+      <div style={emptyStyle}>
         Select a node to configure
       </div>
     );
   }
 
   const config = (node.data.config as Record<string, unknown>) || {};
+  const sourceMediaType = normalizeSourceMediaType(config.media_type);
+  const sourceAssets = assets.filter(asset => inferAssetKind(asset) === sourceMediaType);
+  const selectedSourceAsset = sourceAssets.find(asset => asset.id === config.asset_id) ?? null;
+  const currentDefinition: PipelineDefinition = {
+    nodes: nodes.map(currentNode => ({
+      id: currentNode.id,
+      type: (currentNode.data.nodeType as string) || currentNode.type || '',
+      position: currentNode.position,
+      data: {
+        label: (currentNode.data.label as string) || '',
+        config: ((currentNode.data.config as Record<string, unknown>) || {}),
+        asset_id: (currentNode.data.asset_id as string | undefined),
+      },
+    })),
+    edges: edges.map(edge => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourceHandle || 'output',
+      targetHandle: edge.targetHandle || 'input',
+    })),
+    viewport: { x: 0, y: 0, zoom: 1 },
+  };
 
   const handleChange = (name: string, value: unknown) => {
     updateNodeConfig(node.id, { [name]: value });
@@ -75,21 +142,32 @@ export default function ConfigPanel() {
       return;
     }
 
+    const maxResults = Number(config.max_results || 8);
+
     try {
       setSearchLoading(true);
       setSearchError(null);
       const response = await fetch('/youtube/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, max_results: 8 }),
+        body: JSON.stringify({ query, max_results: maxResults }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
         throw new Error(payload?.detail || `Search failed with status ${response.status}`);
       }
       const payload = await response.json() as { results?: YouTubeSearchResult[] };
-      setSearchResults(payload.results || []);
-      handleChange('query', query);
+      const nextResults = payload.results || [];
+      const nextResultIds = new Set(nextResults.map(result => result.id));
+      const preservedIds = selectedVideoIds.filter(id => nextResultIds.has(id));
+      const nextSelectedIds = preservedIds.length > 0 ? preservedIds : nextResults.map(result => result.id);
+      setSearchResults(nextResults);
+      setSelectedVideoIds(nextSelectedIds);
+      updateNodeConfig(node.id, {
+        query,
+        search_results: nextResults,
+        selected_video_ids: nextSelectedIds,
+      });
     } catch (error) {
       setSearchError(error instanceof Error ? error.message : 'Search failed');
       setSearchResults([]);
@@ -118,31 +196,33 @@ export default function ConfigPanel() {
     return true;
   });
 
+  const toggleSelectedVideo = (videoId: string) => {
+    const next = selectedVideoIds.includes(videoId)
+      ? selectedVideoIds.filter(id => id !== videoId)
+      : [...selectedVideoIds, videoId];
+    setSelectedVideoIds(next);
+    updateNodeConfig(node.id, { selected_video_ids: next });
+  };
+
+  const selectVisibleVideos = () => {
+    const next = filteredSearchResults.map(result => result.id);
+    setSelectedVideoIds(next);
+    updateNodeConfig(node.id, { selected_video_ids: next });
+  };
+
+  const clearSelectedVideos = () => {
+    setSelectedVideoIds([]);
+    updateNodeConfig(node.id, { selected_video_ids: [] });
+  };
+
   return (
-    <div style={{
-      width: 280,
-      backgroundColor: '#0f172a',
-      borderLeft: '1px solid #1e293b',
-      overflowY: 'auto',
-      padding: 16,
-      color: '#e2e8f0',
-      fontSize: 13,
-    }}>
+    <div style={panelStyle}>
       <div style={{ marginBottom: 16 }}>
-        <label style={{ display: 'block', fontSize: 11, color: '#64748b', marginBottom: 4 }}>Label</label>
+        <label style={labelStyle}>Label</label>
         <input
           value={(node.data.label as string) || ''}
           onChange={e => updateNodeLabel(node.id, e.target.value)}
-          style={{
-            width: '100%',
-            padding: '6px 8px',
-            backgroundColor: '#1e293b',
-            border: '1px solid #334155',
-            borderRadius: 4,
-            color: '#e2e8f0',
-            fontSize: 13,
-            outline: 'none',
-          }}
+          style={inputStyle}
         />
       </div>
 
@@ -150,108 +230,106 @@ export default function ConfigPanel() {
         {typeDef.icon} {typeDef.display_name}
       </div>
 
-      {/* Asset picker for source nodes */}
       {node.data.nodeType === 'source' && (
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ display: 'block', fontSize: 11, color: '#64748b', marginBottom: 4 }}>Asset</label>
-          <select
-            value={(config.asset_id as string) || ''}
-            onChange={e => handleChange('asset_id', e.target.value)}
-            style={{
-              width: '100%',
-              padding: '6px 8px',
-              backgroundColor: '#1e293b',
-              border: '1px solid #334155',
-              borderRadius: 4,
-              color: '#e2e8f0',
-              fontSize: 13,
-            }}
-          >
-            <option value="">-- Select asset --</option>
-            {assets.map(a => (
-              <option key={a.id} value={a.id}>{a.original_name}</option>
-            ))}
-          </select>
+        <div style={cardStyle}>
+          <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 700, marginBottom: 8 }}>
+            Source Input
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+            Choose what kind of asset this node should output, then pick one uploaded file of that type.
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}>Source type</label>
+            <select
+              value={sourceMediaType}
+              onChange={e => {
+                const nextType = e.target.value as SourceMediaKind;
+                const nextAssets = assets.filter(asset => inferAssetKind(asset) === nextType);
+                const selectedStillMatches = nextAssets.some(asset => asset.id === config.asset_id);
+                updateNodeConfig(node.id, {
+                  media_type: nextType,
+                  asset_id: selectedStillMatches ? config.asset_id : '',
+                });
+              }}
+              style={inputStyle}
+            >
+              {SOURCE_MEDIA_OPTIONS.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}>Asset</label>
+            <select
+              value={(config.asset_id as string) || ''}
+              onChange={e => handleChange('asset_id', e.target.value)}
+              style={inputStyle}
+            >
+              <option value="">{sourceAssets.length > 0 ? '-- Select asset --' : '-- No matching assets --'}</option>
+              {sourceAssets.map(asset => (
+                <option key={asset.id} value={asset.id}>
+                  {formatAssetOption(asset)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ fontSize: 11, color: '#94a3b8' }}>
+            {selectedSourceAsset
+              ? `Selected: ${selectedSourceAsset.original_name}`
+              : sourceAssets.length > 0
+                ? `${sourceAssets.length} matching assets available`
+                : `No ${sourceMediaType} assets uploaded yet`}
+          </div>
         </div>
       )}
 
-      {node.data.nodeType === 'url_download' && (
-        <div style={{
-          marginBottom: 16,
-          padding: 12,
-          borderRadius: 8,
-          backgroundColor: '#111827',
-          border: '1px solid #1f2937',
-        }}>
+      {node.data.nodeType === 'youtube_search' && (
+        <div style={cardStyle}>
           <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 700, marginBottom: 8 }}>
-            YouTube Search
+            Search and Select
           </div>
           <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
-            Search uses yt-dlp, then fills the node URL. It does not consume official YouTube Data API quota.
+            Search YouTube, then select which videos this channel should contribute to batch records.
           </div>
           <input
             value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search YouTube videos"
-            style={{
-              width: '100%',
-              padding: '6px 8px',
-              backgroundColor: '#1e293b',
-              border: '1px solid #334155',
-              borderRadius: 4,
-              color: '#e2e8f0',
-              fontSize: 13,
-              outline: 'none',
-              marginBottom: 8,
+            onChange={e => {
+              setSearchQuery(e.target.value);
+              handleChange('query', e.target.value);
             }}
+            placeholder="Search YouTube videos"
+            style={{ ...inputStyle, marginBottom: 8 }}
           />
           <button
             type="button"
             onClick={() => void handleSearch()}
             disabled={searchLoading}
-            style={{
-              width: '100%',
-              padding: '8px 10px',
-              backgroundColor: '#1d4ed8',
-              border: 'none',
-              borderRadius: 6,
-              color: '#eff6ff',
-              fontSize: 12,
-              cursor: searchLoading ? 'default' : 'pointer',
-              opacity: searchLoading ? 0.7 : 1,
-            }}
+            style={primaryButtonStyle}
           >
             {searchLoading ? 'Searching...' : 'Search'}
           </button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
+            <button type="button" onClick={selectVisibleVideos} style={smallButtonStyle}>
+              Select Visible
+            </button>
+            <button type="button" onClick={clearSelectedVideos} style={smallButtonStyle}>
+              Clear
+            </button>
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 110px', gap: 8, marginTop: 8 }}>
             <input
               value={channelFilter}
               onChange={e => setChannelFilter(e.target.value)}
               placeholder="Filter by channel"
-              style={{
-                width: '100%',
-                padding: '6px 8px',
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: 4,
-                color: '#e2e8f0',
-                fontSize: 12,
-                outline: 'none',
-              }}
+              style={{ ...inputStyle, fontSize: 12, backgroundColor: '#0f172a' }}
             />
             <select
               value={durationFilter}
               onChange={e => setDurationFilter(e.target.value as 'any' | 'short' | 'medium' | 'long')}
-              style={{
-                width: '100%',
-                padding: '6px 8px',
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: 4,
-                color: '#e2e8f0',
-                fontSize: 12,
-                outline: 'none',
-              }}
+              style={{ ...inputStyle, fontSize: 12, backgroundColor: '#0f172a' }}
             >
               <option value="any">Any length</option>
               <option value="short">Short</option>
@@ -265,32 +343,27 @@ export default function ConfigPanel() {
           {searchResults.length > 0 ? (
             <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
               <div style={{ fontSize: 11, color: '#64748b' }}>
-                Showing {filteredSearchResults.length} of {searchResults.length} results
+                Showing {filteredSearchResults.length} of {searchResults.length} results · selected {selectedVideoIds.length}
               </div>
               {filteredSearchResults.map(result => (
-                <button
+                <div
                   key={result.id}
-                  type="button"
-                  onClick={() => handleChange('url', result.url)}
                   style={{
-                    textAlign: 'left',
                     padding: 10,
                     borderRadius: 6,
                     border: '1px solid #334155',
                     backgroundColor: '#0f172a',
                     color: '#e2e8f0',
-                    cursor: 'pointer',
                   }}
                 >
-                  <div style={{ display: 'grid', gridTemplateColumns: '96px 1fr', gap: 10, alignItems: 'start' }}>
-                    <div style={{
-                      width: 96,
-                      aspectRatio: '16 / 9',
-                      borderRadius: 6,
-                      overflow: 'hidden',
-                      backgroundColor: '#1e293b',
-                      border: '1px solid #334155',
-                    }}>
+                  <label style={{ display: 'grid', gridTemplateColumns: '20px 96px 1fr', gap: 10, alignItems: 'start', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedVideoIds.includes(result.id)}
+                      onChange={() => toggleSelectedVideo(result.id)}
+                      style={{ marginTop: 4 }}
+                    />
+                    <div style={thumbnailWrapStyle}>
                       {result.thumbnail ? (
                         <img
                           src={result.thumbnail}
@@ -310,8 +383,8 @@ export default function ConfigPanel() {
                         {result.url}
                       </div>
                     </div>
-                  </div>
-                </button>
+                  </label>
+                </div>
               ))}
               {filteredSearchResults.length === 0 ? (
                 <div style={{ fontSize: 11, color: '#94a3b8' }}>
@@ -323,9 +396,70 @@ export default function ConfigPanel() {
         </div>
       )}
 
-      {/* Params */}
+      {node.data.nodeType === 'zip_records' && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 11, color: '#c4b5fd', fontWeight: 700, marginBottom: 8 }}>
+            Zip Summary
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+            Output records use the shortest selected search channel and respect record_limit when set.
+          </div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {getZipConnectionSummary(currentDefinition, node.id).map(summary => (
+              <div key={summary.channel} style={summaryCardStyle}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                  Channel {summary.channel}
+                </div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                  Search: {summary.searchLabel || 'unconnected'}
+                </div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                  Selected videos: {summary.selectedCount}
+                </div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                  URL Download target: {summary.downloadLabel || 'unconnected'}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {node.data.nodeType === 'url_download' && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 11, color: '#60a5fa', fontWeight: 700, marginBottom: 6 }}>
+            URL Download
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b' }}>
+            Use the URL field directly, or connect a Zip Records output into this node.
+          </div>
+        </div>
+      )}
+
+      {node.data.nodeType === 'subtitle_translate' && (
+        <div style={{ marginBottom: 12 }}>
+          <label style={labelStyle}>model</label>
+          <select
+            value={String(config.model || '')}
+            onChange={e => handleChange('model', e.target.value)}
+            style={inputStyle}
+          >
+            <option value="">
+              {minimaxLoading ? 'Loading MiniMax models...' : minimaxBlankLabel}
+            </option>
+            {minimaxModels.map(model => (
+              <option key={model} value={model}>{model}</option>
+            ))}
+          </select>
+          <div style={{ fontSize: 11, color: '#475569', marginTop: 2 }}>
+            Optional MiniMax translation model override from Exo Watchdog.
+          </div>
+        </div>
+      )}
+
       {typeDef.params
-        .filter(p => p.name !== 'asset_id' && p.name !== 'media_type')
+        .filter(p => p.name !== 'asset_id' && p.name !== 'media_type' && !(node.data.nodeType === 'subtitle_translate' && p.name === 'model'))
+        .filter(p => !(node.data.nodeType === 'youtube_search' && p.name === 'query'))
         .map(param => (
           <ParamField
             key={param.name}
@@ -367,6 +501,71 @@ function formatDuration(duration?: number | null) {
   return parts.join(':');
 }
 
+function normalizeSourceMediaType(value: unknown): SourceMediaKind {
+  if (value === 'audio' || value === 'subtitle' || value === 'image' || value === 'video') {
+    return value;
+  }
+  return 'video';
+}
+
+function inferAssetKind(asset: Asset): SourceMediaKind | 'other' {
+  const mime = (asset.mime_type || '').toLowerCase();
+  const name = asset.original_name.toLowerCase();
+
+  if (
+    mime.startsWith('video/') ||
+    ['.mp4', '.mov', '.mkv', '.avi', '.webm'].some(ext => name.endsWith(ext))
+  ) {
+    return 'video';
+  }
+  if (
+    mime.startsWith('audio/') ||
+    ['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg'].some(ext => name.endsWith(ext))
+  ) {
+    return 'audio';
+  }
+  if (
+    mime.startsWith('image/') ||
+    ['.png', '.jpg', '.jpeg', '.webp'].some(ext => name.endsWith(ext))
+  ) {
+    return 'image';
+  }
+  if (
+    mime.includes('subrip') ||
+    mime.includes('subtitle') ||
+    ['.srt', '.vtt', '.ass', '.ssa'].some(ext => name.endsWith(ext))
+  ) {
+    return 'subtitle';
+  }
+
+  return 'other';
+}
+
+function formatAssetOption(asset: Asset): string {
+  const kind = inferAssetKind(asset);
+  const duration = Number(asset.media_info?.duration_seconds || asset.media_info?.duration || 0);
+  const size = Number(asset.file_size || 0);
+  const meta: string[] = [];
+  if (kind !== 'other') {
+    meta.push(kind);
+  }
+  const formattedDuration = formatDuration(Number.isFinite(duration) ? duration : 0);
+  if (formattedDuration) {
+    meta.push(formattedDuration);
+  }
+  if (size > 0) {
+    meta.push(formatFileSize(size));
+  }
+  return meta.length > 0 ? `${asset.original_name} (${meta.join(' · ')})` : asset.original_name;
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 function ParamField({
   param,
   value,
@@ -377,20 +576,10 @@ function ParamField({
   onChange: (val: unknown) => void;
 }) {
   const current = value ?? param.default;
-  const inputStyle = {
-    width: '100%',
-    padding: '6px 8px',
-    backgroundColor: '#1e293b',
-    border: '1px solid #334155',
-    borderRadius: 4,
-    color: '#e2e8f0',
-    fontSize: 13,
-    outline: 'none',
-  };
 
   return (
     <div style={{ marginBottom: 12 }}>
-      <label style={{ display: 'block', fontSize: 11, color: '#64748b', marginBottom: 4 }}>
+      <label style={labelStyle}>
         {param.name.replace(/_/g, ' ')}
         {param.required && <span style={{ color: '#ef4444' }}> *</span>}
       </label>
@@ -440,3 +629,85 @@ function ParamField({
     </div>
   );
 }
+
+const emptyStyle: CSSProperties = {
+  width: 280,
+  backgroundColor: '#0f172a',
+  borderLeft: '1px solid #1e293b',
+  padding: 16,
+  color: '#64748b',
+  fontSize: 13,
+};
+
+const panelStyle: CSSProperties = {
+  width: 280,
+  backgroundColor: '#0f172a',
+  borderLeft: '1px solid #1e293b',
+  overflowY: 'auto',
+  padding: 16,
+  color: '#e2e8f0',
+  fontSize: 13,
+};
+
+const labelStyle: CSSProperties = {
+  display: 'block',
+  fontSize: 11,
+  color: '#64748b',
+  marginBottom: 4,
+};
+
+const inputStyle: CSSProperties = {
+  width: '100%',
+  padding: '6px 8px',
+  backgroundColor: '#1e293b',
+  border: '1px solid #334155',
+  borderRadius: 4,
+  color: '#e2e8f0',
+  fontSize: 13,
+  outline: 'none',
+};
+
+const cardStyle: CSSProperties = {
+  marginBottom: 16,
+  padding: 12,
+  borderRadius: 8,
+  backgroundColor: '#111827',
+  border: '1px solid #1f2937',
+};
+
+const primaryButtonStyle: CSSProperties = {
+  width: '100%',
+  padding: '8px 10px',
+  backgroundColor: '#1d4ed8',
+  border: 'none',
+  borderRadius: 6,
+  color: '#eff6ff',
+  fontSize: 12,
+  cursor: 'pointer',
+};
+
+const smallButtonStyle: CSSProperties = {
+  padding: '6px 10px',
+  backgroundColor: '#0f172a',
+  color: '#cbd5e1',
+  border: '1px solid #334155',
+  borderRadius: 6,
+  cursor: 'pointer',
+  fontSize: 11,
+};
+
+const thumbnailWrapStyle: CSSProperties = {
+  width: 96,
+  aspectRatio: '16 / 9',
+  borderRadius: 6,
+  overflow: 'hidden',
+  backgroundColor: '#1e293b',
+  border: '1px solid #334155',
+};
+
+const summaryCardStyle: CSSProperties = {
+  padding: 10,
+  borderRadius: 6,
+  border: '1px solid #334155',
+  backgroundColor: '#0f172a',
+};

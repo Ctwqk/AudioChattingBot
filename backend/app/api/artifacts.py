@@ -37,7 +37,6 @@ async def cleanup_intermediates(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete intermediate artifacts (files + DB records) for completed jobs."""
-    storage = get_storage()
     job_filter = uuid.UUID(job_id) if job_id else None
 
     # Build query for intermediate artifacts of completed jobs.
@@ -75,6 +74,15 @@ async def cleanup_intermediates(
         if node_execution.node_id in terminal_nodes:
             continue
 
+        # Download cache objects are intentionally shared across jobs and should
+        # outlive individual artifact records so future URL downloads can reuse them.
+        if artifact.storage_path.startswith("download-cache/"):
+            node_execution.output_artifact_id = None
+            await db.delete(artifact)
+            deleted_count += 1
+            freed_bytes += artifact.file_size or 0
+            continue
+
         shared_asset = await db.execute(
             select(Asset.id)
             .where(
@@ -95,7 +103,7 @@ async def cleanup_intermediates(
 
         if not shared_asset.scalar_one_or_none() and not shared_artifact.scalar_one_or_none():
             try:
-                await storage.delete(artifact.storage_path)
+                await get_storage(artifact.storage_backend).delete(artifact.storage_path)
             except Exception:
                 pass  # file may already be gone
 
@@ -117,7 +125,7 @@ async def download_artifact(artifact_id: uuid.UUID, db: AsyncSession = Depends(g
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    storage = get_storage()
+    storage = get_storage(artifact.storage_backend)
     local_path = storage.get_local_path(artifact.storage_path)
 
     if local_path:

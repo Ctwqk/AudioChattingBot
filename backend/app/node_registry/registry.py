@@ -54,15 +54,21 @@ class NodeTypeRegistry:
             trim,
             watermark,
             subtitle,
+            speech_to_subtitle,
+            subtitle_translate,
+            subtitle_to_speech,
             bgm,
+            replace_audio,
             transcode,
             url_download,
+            youtube_search,
+            zip_records,
             export,
             youtube_upload,
         )
         for mod in [
             source, concat_horizontal, concat_vertical, concat_timeline,
-            trim, watermark, subtitle, bgm, transcode,
-            url_download, export, youtube_upload,
+            trim, watermark, subtitle, speech_to_subtitle, subtitle_translate, subtitle_to_speech, bgm, replace_audio, transcode,
+            url_download, youtube_search, zip_records, export, youtube_upload,
         ]:
             self.register(mod.DEFINITION)

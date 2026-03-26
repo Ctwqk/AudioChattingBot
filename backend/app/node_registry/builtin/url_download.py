@@ -6,7 +6,14 @@ DEFINITION = NodeTypeDefinition(
     category="source",
     description="Download video from YouTube or URL via yt-dlp",
     icon="download",
-    inputs=[],
+    inputs=[
+        PortDefinition(
+            name="url_input",
+            port_type=PortType.URL_VALUE,
+            required=False,
+            description="Planner-provided URL",
+        ),
+    ],
     outputs=[
         PortDefinition(name="output", port_type=PortType.ANY_MEDIA, description="Downloaded video"),
     ],

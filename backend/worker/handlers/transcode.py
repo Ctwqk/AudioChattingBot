@@ -13,28 +13,19 @@ class TranscodeHandler(BaseHandler):
 
         args = ["-i", video]
 
-        # Video codec
-        args.extend(["-c:v", video_codec])
-
-        if video_codec not in ("copy",):
-            # CRF (only for x264/x265)
-            if video_codec in ("libx264", "libx265"):
-                args.extend(["-crf", str(int(crf))])
-                args.extend(["-preset", preset])
-            elif video_codec in ("h264_nvenc", "hevc_nvenc"):
-                # Map the existing CRF-style UI to NVENC's constant-quality mode.
-                args.extend(["-rc:v", "vbr", "-cq:v", str(int(crf)), "-preset", preset])
-            elif video_codec == "libvpx-vp9":
-                args.extend(["-crf", str(int(crf)), "-b:v", "0"])
-
-            # Resolution (convert WxH → W:H for ffmpeg scale filter)
-            if resolution and resolution != "original":
-                scale_val = resolution.replace("x", ":")
-                args.extend(["-vf", f"scale={scale_val}"])
-
-            # Bitrate
+        if video_codec == "copy":
+            args.extend(["-c:v", "copy"])
+        elif video_codec == "libvpx-vp9":
+            args.extend(["-c:v", "libvpx-vp9", "-crf", str(int(crf)), "-b:v", "0"])
             if bitrate:
                 args.extend(["-b:v", bitrate])
+        else:
+            args.extend(self.build_video_encode_args(video_codec, preset=preset, crf=crf, bitrate=bitrate))
+
+        # Resolution (convert WxH → W:H for ffmpeg scale filter)
+        if video_codec != "copy" and resolution and resolution != "original":
+            scale_val = resolution.replace("x", ":")
+            args.extend(["-vf", f"scale={scale_val}"])
 
         # Audio codec
         args.extend(["-c:a", audio_codec])

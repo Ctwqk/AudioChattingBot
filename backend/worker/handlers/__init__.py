@@ -6,7 +6,11 @@ from worker.handlers.concat_vertical import ConcatVerticalHandler
 from worker.handlers.concat_timeline import ConcatTimelineHandler
 from worker.handlers.watermark import WatermarkHandler
 from worker.handlers.subtitle import SubtitleHandler
+from worker.handlers.speech_to_subtitle import SpeechToSubtitleHandler
+from worker.handlers.subtitle_translate import SubtitleTranslateHandler
+from worker.handlers.subtitle_to_speech import SubtitleToSpeechHandler
 from worker.handlers.bgm import BgmHandler
+from worker.handlers.replace_audio import ReplaceAudioHandler
 from worker.handlers.transcode import TranscodeHandler
 from worker.handlers.url_download import UrlDownloadHandler
 from worker.handlers.export import ExportHandler
@@ -20,7 +24,11 @@ HANDLER_MAP: dict[str, type[BaseHandler]] = {
     "concat_timeline": ConcatTimelineHandler,
     "watermark": WatermarkHandler,
     "subtitle": SubtitleHandler,
+    "speech_to_subtitle": SpeechToSubtitleHandler,
+    "subtitle_translate": SubtitleTranslateHandler,
+    "subtitle_to_speech": SubtitleToSpeechHandler,
     "bgm": BgmHandler,
+    "replace_audio": ReplaceAudioHandler,
     "transcode": TranscodeHandler,
     "url_download": UrlDownloadHandler,
     "export": ExportHandler,

@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 api = []
 worker = [
+    "faster-whisper",
     "google-api-python-client",
     "google-auth-httplib2",
     "google-auth-oauthlib",

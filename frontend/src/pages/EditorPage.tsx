@@ -16,7 +16,7 @@ import { createEditorNode } from '../utils/editorNodes';
 export default function EditorPage() {
   const { pipelineId: routePipelineId } = useParams<{ pipelineId?: string }>();
   const {
-    nodes, edges, onNodesChange, onEdgesChange, onConnect,
+    nodes, edges, pipelineId, isDirty, onNodesChange, onEdgesChange, onConnect,
     addNode, setSelectedNodeId, setPipeline, clear,
   } = useEditorStore();
   const { nodeTypes } = useNodeTypes();
@@ -44,10 +44,20 @@ export default function EditorPage() {
         // Pipeline not found, start fresh
         clear();
       });
-    } else {
-      clear();
     }
   }, [routePipelineId, setPipeline, clear]);
+
+  useEffect(() => {
+    if (routePipelineId) {
+      return;
+    }
+
+    if (nodes.length > 0 || edges.length > 0 || isDirty || pipelineId) {
+      return;
+    }
+
+    clear();
+  }, [routePipelineId, nodes.length, edges.length, isDirty, pipelineId, clear]);
 
   const handleAddNode = useCallback((typeName: string) => {
     addNode(createEditorNode(

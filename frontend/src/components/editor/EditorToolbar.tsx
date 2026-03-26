@@ -6,6 +6,7 @@ import type { PipelineDefinition } from '../../api/types';
 import useNodeTypes from '../../hooks/useNodeTypes';
 import { applyNodeDefaults } from '../../utils/nodeConfig';
 import BatchExecuteModal, { buildBatchExample, parseBatchItems } from '../batch/BatchExecuteModal';
+import { buildPlannerBatchItems, hasPlannerNodes } from '../../utils/plannerBatch';
 
 export default function EditorToolbar() {
   const { nodes, edges, pipelineId, pipelineName, isDirty, setPipeline, setPipelineName } = useEditorStore();
@@ -143,6 +144,7 @@ export default function EditorToolbar() {
     setSubmitting(true);
     setMessage(null);
     try {
+      const definition = getDefinition();
       const targetPipelineId = isDirty || !pipelineId
         ? await ensureSaved()
         : pipelineId;
@@ -150,12 +152,23 @@ export default function EditorToolbar() {
         return;
       }
 
-      const res = await apiClient.post('/jobs', { pipeline_id: targetPipelineId });
+      const payload = hasPlannerNodes(definition)
+        ? (() => {
+            const items = buildPlannerBatchItems(definition);
+            if (items.length !== 1) {
+              throw new Error(`Planner flow resolved to ${items.length} records. Use Batch Run instead of Run.`);
+            }
+            return { pipeline_id: targetPipelineId, inputs: items[0] };
+          })()
+        : { pipeline_id: targetPipelineId };
+
+      const res = await apiClient.post('/jobs', payload);
       setMessage({ type: 'success', text: 'Job submitted!' });
       setTimeout(() => navigate(`/jobs/${res.data.id}`), 1000);
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setMessage({ type: 'error', text: detail || 'Submit failed' });
+      const message = err instanceof Error ? err.message : null;
+      setMessage({ type: 'error', text: detail || message || 'Submit failed' });
     } finally {
       setSubmitting(false);
     }
@@ -170,8 +183,13 @@ export default function EditorToolbar() {
     }
 
     setBatchInputError(null);
-    setBatchInputText(JSON.stringify(buildBatchExample(getDefinition()), null, 2));
-    setBatchOpen(true);
+    try {
+      setBatchInputText(JSON.stringify(buildBatchExample(getDefinition()), null, 2));
+      setBatchOpen(true);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to prepare batch input';
+      setMessage({ type: 'error', text: message });
+    }
   };
 
   const handleBatchSubmit = async () => {
@@ -280,7 +298,9 @@ export default function EditorToolbar() {
       {batchOpen && (
         <BatchExecuteModal
           title="Batch Run"
-          description="Submit a JSON array of parameter dictionaries to the pipeline batch API."
+          description={hasPlannerNodes(getDefinition())
+            ? 'Planner nodes generated these batch items from selected search results. You can inspect or edit the JSON before submission.'
+            : 'Submit a JSON array of parameter dictionaries to the pipeline batch API.'}
           value={batchInputText}
           submitting={submittingBatch}
           error={batchInputError}

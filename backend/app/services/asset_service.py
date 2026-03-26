@@ -112,7 +112,7 @@ async def delete_asset(db: AsyncSession, asset_id: uuid.UUID) -> bool:
     if not asset:
         return False
 
-    storage = get_storage()
+    storage = get_storage(asset.storage_backend)
     await storage.delete(asset.storage_path)
     await db.delete(asset)
     await db.commit()

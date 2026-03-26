@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     cors_origins: list[str] = ["*"]
+    exo_watchdog_url: str = "http://exo-watchdog.constructure-monitor.svc.cluster.local:8000"
+
+    # Video worker features
+    video_use_gpu: bool = False
+    video_use_videotoolbox: bool = False
 
     model_config = {"env_prefix": "", "case_sensitive": False}
 

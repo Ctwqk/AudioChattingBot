@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import shutil
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,10 @@ class BaseHandler(abc.ABC):
         value = os.environ.get("VIDEO_USE_GPU", "").strip().lower()
         return value in {"1", "true", "yes", "on"}
 
+    def videotoolbox_enabled(self) -> bool:
+        value = os.environ.get("VIDEO_USE_VIDEOTOOLBOX", "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
     def gpu_fallback_enabled(self) -> bool:
         value = os.environ.get("VIDEO_GPU_FALLBACK_TO_CPU", "true").strip().lower()
         return value in {"1", "true", "yes", "on"}
@@ -55,14 +60,19 @@ class BaseHandler(abc.ABC):
 
     def preferred_video_codec(self, codec: str | None = None) -> str:
         selected = codec or "libx264"
-        if not self.gpu_enabled():
-            return selected
-
-        codec_map = {
-            "libx264": "h264_nvenc",
-            "libx265": "hevc_nvenc",
-        }
-        return codec_map.get(selected, selected)
+        if self.gpu_enabled():
+            codec_map = {
+                "libx264": "h264_nvenc",
+                "libx265": "hevc_nvenc",
+            }
+            return codec_map.get(selected, selected)
+        if self.videotoolbox_enabled():
+            codec_map = {
+                "libx264": "h264_videotoolbox",
+                "libx265": "hevc_videotoolbox",
+            }
+            return codec_map.get(selected, selected)
+        return selected
 
     def build_video_encode_args(
         self,
@@ -83,24 +93,41 @@ class BaseHandler(abc.ABC):
             if crf is not None:
                 args.extend(["-rc:v", "vbr", "-cq:v", str(int(crf))])
             args.extend(["-preset", preset])
+        elif selected in ("h264_videotoolbox", "hevc_videotoolbox"):
+            # `-q:v` support is inconsistent across macOS ffmpeg builds; bitrate mode
+            # is the stable baseline for headless Apple Silicon workers.
+            args.extend(["-b:v", bitrate or self._default_videotoolbox_bitrate(selected)])
 
         if bitrate:
-            args.extend(["-b:v", bitrate])
+            if selected not in ("h264_videotoolbox", "hevc_videotoolbox"):
+                args.extend(["-b:v", bitrate])
 
         return args
 
-    def _contains_nvenc(self, args: list[str]) -> bool:
-        return any(token in {"h264_nvenc", "hevc_nvenc"} for token in args)
+    def _default_videotoolbox_bitrate(self, codec: str) -> str:
+        return {
+            "h264_videotoolbox": "6M",
+            "hevc_videotoolbox": "4M",
+        }.get(codec, "6M")
+
+    def _contains_hardware_codec(self, args: list[str]) -> bool:
+        return any(
+            token in {"h264_nvenc", "hevc_nvenc", "h264_videotoolbox", "hevc_videotoolbox"}
+            for token in args
+        )
 
     def _cpu_codec_for(self, codec: str) -> str:
         return {
             "h264_nvenc": "libx264",
             "hevc_nvenc": "libx265",
+            "h264_videotoolbox": "libx264",
+            "hevc_videotoolbox": "libx265",
         }.get(codec, codec)
 
-    def _rewrite_nvenc_args_for_cpu(self, args: list[str]) -> list[str]:
+    def _rewrite_hardware_args_for_cpu(self, args: list[str]) -> list[str]:
         rewritten: list[str] = []
         removed_cq: str | None = None
+        removed_qv: str | None = None
         has_crf = False
         i = 0
         while i < len(args):
@@ -120,6 +147,10 @@ class BaseHandler(abc.ABC):
                 removed_cq = nxt
                 i += 2
                 continue
+            if token == "-q:v" and nxt is not None:
+                removed_qv = nxt
+                i += 2
+                continue
             if token == "-rc:v" and nxt is not None:
                 i += 2
                 continue
@@ -127,9 +158,10 @@ class BaseHandler(abc.ABC):
             rewritten.append(token)
             i += 1
 
-        if removed_cq is not None and not has_crf:
+        replacement_crf = removed_cq or removed_qv
+        if replacement_crf is not None and not has_crf:
             insert_at = len(rewritten) - 1 if rewritten and not rewritten[-1].startswith("-") else len(rewritten)
-            rewritten[insert_at:insert_at] = ["-crf", removed_cq]
+            rewritten[insert_at:insert_at] = ["-crf", replacement_crf]
 
         return rewritten
 
@@ -184,8 +216,30 @@ class BaseHandler(abc.ABC):
             "cuda_error_out_of_memory",
             "out of memory",
             "nvenc",
+            "videotoolbox",
+            "videotoolbox encoder",
+            "hardware encoder may be busy",
+            "error while opening encoder for output stream",
         )
         return any(indicator in lowered for indicator in indicators)
+
+    def resolve_executable(self, name: str) -> str:
+        """Resolve a binary from PATH or from the current Python environment's bin directory."""
+        env_name = f"{name.upper().replace('-', '_')}_BIN"
+        explicit_path = os.environ.get(env_name, "").strip()
+        if explicit_path:
+            return explicit_path
+
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+        python_bin = os.path.dirname(sys.executable)
+        candidate = os.path.join(python_bin, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+        raise FileNotFoundError(f"Could not find executable '{name}'")
 
     async def run_ffmpeg(self, args: list[str]) -> str:
         """Run an ffmpeg command and return stderr output."""
@@ -193,8 +247,8 @@ class BaseHandler(abc.ABC):
             raise CancelledError("Node cancelled before ffmpeg started")
 
         ffmpeg_args = args
-        if self._contains_nvenc(ffmpeg_args) and await self._gpu_looks_busy():
-            ffmpeg_args = self._rewrite_nvenc_args_for_cpu(ffmpeg_args)
+        if self._contains_hardware_codec(ffmpeg_args) and await self._gpu_looks_busy():
+            ffmpeg_args = self._rewrite_hardware_args_for_cpu(ffmpeg_args)
 
         cmd = ["ffmpeg", "-y", "-hide_banner"] + ffmpeg_args
         logger.info(f"Running: {' '.join(cmd)}")
@@ -211,12 +265,12 @@ class BaseHandler(abc.ABC):
         if self._proc.returncode != 0:
             if (
                 ffmpeg_args is args
-                and self._contains_nvenc(ffmpeg_args)
+                and self._contains_hardware_codec(ffmpeg_args)
                 and self.gpu_fallback_enabled()
                 and self._is_gpu_capacity_error(stderr_text)
             ):
-                logger.warning("GPU ffmpeg run failed with a GPU-capacity error; retrying on CPU")
-                return await self.run_ffmpeg(self._rewrite_nvenc_args_for_cpu(args))
+                logger.warning("Hardware-accelerated ffmpeg run failed; retrying on CPU")
+                return await self.run_ffmpeg(self._rewrite_hardware_args_for_cpu(args))
             raise RuntimeError(f"ffmpeg failed (exit {self._proc.returncode}):\n{stderr_text[-2000:]}")
         return stderr_text
 

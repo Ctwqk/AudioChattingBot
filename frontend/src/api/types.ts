@@ -37,7 +37,7 @@ export interface Pipeline {
 }
 
 // Job types
-export type JobStatus = 'PENDING' | 'VALIDATING' | 'PLANNING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+export type JobStatus = 'PENDING' | 'VALIDATING' | 'PLANNING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'PARTIALLY_FAILED';
 export type NodeStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED' | 'CANCELLED';
 
 export interface Job {
@@ -93,7 +93,7 @@ export interface Artifact {
 // Node type registry
 export interface PortDefinition {
   name: string;
-  port_type: 'video' | 'audio' | 'image' | 'subtitle' | 'any_media';
+  port_type: 'video' | 'audio' | 'image' | 'subtitle' | 'any_media' | 'search_results' | 'url_value';
   required: boolean;
   description: string;
 }

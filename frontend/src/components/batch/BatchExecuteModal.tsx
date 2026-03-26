@@ -1,25 +1,9 @@
 import type { CSSProperties } from 'react';
 import type { PipelineDefinition } from '../../api/types';
+import { buildBatchItems } from '../../utils/plannerBatch';
 
 export function buildBatchExample(definition: PipelineDefinition): Array<Record<string, unknown>> {
-  const example: Record<string, unknown> = {};
-
-  for (const node of definition.nodes || []) {
-    const config = node.data?.config || {};
-    if (node.type === 'source') {
-      example[`${node.id}.asset_id`] = (config.asset_id as string) || '';
-      continue;
-    }
-
-    for (const [key, value] of Object.entries(config)) {
-      if (value === '' || value === null || value === undefined) {
-        continue;
-      }
-      example[`${node.id}.${key}`] = value;
-    }
-  }
-
-  return [example];
+  return buildBatchItems(definition);
 }
 
 export function parseBatchItems(input: string): Array<Record<string, unknown>> {

@@ -55,7 +55,15 @@ export default function AssetsPage() {
   };
 
   return (
-    <div style={{ padding: 24, color: '#e2e8f0', overflowY: 'auto', height: '100%' }}>
+    <div
+      style={{
+        padding: 24,
+        color: '#e2e8f0',
+        overflowY: 'auto',
+        height: '100%',
+        backgroundColor: '#020617',
+      }}
+    >
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
         <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Assets</h1>
         <label

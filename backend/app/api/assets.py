@@ -67,7 +67,7 @@ async def download(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
-    storage = get_storage()
+    storage = get_storage(asset.storage_backend)
     local_path = storage.get_local_path(asset.storage_path)
 
     if local_path:

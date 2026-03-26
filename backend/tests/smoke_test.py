@@ -19,9 +19,12 @@ API_BASE = os.environ.get("VP_API_BASE", "http://localhost:8080/api/v1")
 API_ROOT = API_BASE.rsplit("/api/v1", 1)[0]
 FRONTEND_BASE = os.environ.get("VP_FRONTEND_BASE", "http://localhost:3001")
 VITE_BASE = os.environ.get("VP_VITE_BASE", "http://localhost:5173")
-YT_BASE = os.environ.get("VP_YT_BASE", "http://localhost:8899/api")
-YT_ROOT = YT_BASE.rsplit("/api", 1)[0]
-YT_CONTAINER = os.environ.get("VP_YT_CONTAINER", "youtube_manager")
+YT_BASE_CANDIDATES = [
+    os.environ.get("VP_YT_BASE", "").rstrip("/"),
+    "http://localhost:8899/api",
+    f"{FRONTEND_BASE.rstrip('/')}/youtube/api",
+    f"{VITE_BASE.rstrip('/')}/youtube/api",
+]
 YT_DOWNLOAD_DIR = ROOT_DIR / "YouTubeManager" / "downloads"
 YT_TOKEN_FILE = ROOT_DIR / "YouTubeManager" / "credentials" / "token.json"
 YT_QUOTA_FILE = ROOT_DIR / "YouTubeManager" / "credentials" / "quota_usage.json"
@@ -49,6 +52,22 @@ def request(method: str, url: str, *, expected: int | None = None, **kwargs):
             f"{method} {url} -> {response.status_code}, expected {expected}, body={response.text[:500]}"
         )
     return response
+
+
+def resolve_youtube_base() -> str:
+    for candidate in YT_BASE_CANDIDATES:
+        if not candidate:
+            continue
+        base = candidate.rstrip("/")
+        if not base.endswith("/api"):
+            continue
+        try:
+            response = requests.get(f"{base}/auth/status", timeout=5)
+        except Exception:
+            continue
+        if response.status_code == 200:
+            return base
+    raise SmokeFailure("Could not reach any YouTube API base candidate")
 
 
 def json_request(method: str, url: str, *, expected: int | None = None, **kwargs):
@@ -122,47 +141,29 @@ def wait_for_job(job_id: str, *, timeout_seconds: int = 120) -> dict:
     raise SmokeFailure(f"Job {job_id} did not reach a terminal state: {last}")
 
 
-def wait_for_task(task_id: str, *, timeout_seconds: int = 180) -> dict:
+def wait_for_task(yt_base: str, task_id: str, *, timeout_seconds: int = 180) -> dict:
     deadline = time.time() + timeout_seconds
     last = None
     while time.time() < deadline:
-        last = json_request("GET", f"{YT_BASE}/status/{task_id}", expected=200)
+        last = json_request("GET", f"{yt_base}/status/{task_id}", expected=200)
         if last["status"] in TERMINAL_YT_TASK_STATES:
             return last
         time.sleep(1)
     raise SmokeFailure(f"YouTubeManager task {task_id} did not reach a terminal state: {last}")
 
 
-def docker_exec(script: str, *, stdin: bytes | None = None) -> None:
-    subprocess.run(
-        ["docker", "exec", "-i", YT_CONTAINER, "python", "-c", script],
-        input=stdin,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
 def restore_token(token_bytes: bytes | None) -> None:
     if token_bytes is None:
         return
-    docker_exec(
-        "import sys, pathlib; "
-        "path = pathlib.Path('/app/credentials/token.json'); "
-        "path.write_bytes(sys.stdin.buffer.read())",
-        stdin=token_bytes,
-    )
+    YT_TOKEN_FILE.unlink(missing_ok=True)
+    YT_TOKEN_FILE.write_bytes(token_bytes)
 
 
 def restore_quota_usage(quota_bytes: bytes | None) -> None:
     if quota_bytes is None:
         return
-    docker_exec(
-        "import sys, pathlib; "
-        "path = pathlib.Path('/app/credentials/quota_usage.json'); "
-        "path.write_bytes(sys.stdin.buffer.read())",
-        stdin=quota_bytes,
-    )
+    YT_QUOTA_FILE.unlink(missing_ok=True)
+    YT_QUOTA_FILE.write_bytes(quota_bytes)
 
 
 def delete_youtube_video(video_id: str) -> None:
@@ -178,7 +179,12 @@ youtube = build('youtube', 'v3', credentials=creds)
 youtube.videos().delete(id={video_id!r}).execute()
 """
     try:
-        docker_exec(script)
+        subprocess.run(
+            ["docker", "exec", "-i", "youtube_manager", "python", "-c", script],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except Exception:
         pass
 
@@ -477,15 +483,17 @@ def run_backend_smoke(results: list[dict], cleanup: dict) -> None:
 
 def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
     print_step("testing YouTubeManager API")
-    status = json_request("GET", f"{YT_BASE}/auth/status", expected=200)
+    yt_base = resolve_youtube_base()
+    cleanup["yt_base"] = yt_base
+    status = json_request("GET", f"{yt_base}/auth/status", expected=200)
     expect(results, "youtube auth status", isinstance(status.get("authenticated"), bool), json.dumps(status))
 
-    auth_url = json_request("GET", f"{YT_BASE}/auth/url?return_to={FRONTEND_BASE}/editor", expected=200)
+    auth_url = json_request("GET", f"{yt_base}/auth/url?return_to={FRONTEND_BASE}/editor", expected=200)
     expect(results, "youtube auth url", "accounts.google.com" in auth_url["url"])
 
     start_response = request(
         "GET",
-        f"{YT_BASE}/auth/start?return_to={FRONTEND_BASE}/editor&mode=popup",
+        f"{yt_base}/auth/start?return_to={FRONTEND_BASE}/editor&mode=popup",
         expected=307,
         allow_redirects=False,
     )
@@ -493,17 +501,17 @@ def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
 
     invalid_callback = request(
         "GET",
-        f"{YT_BASE}/auth/callback?state=invalid-state&code=invalid-code",
+        f"{yt_base}/auth/callback?state=invalid-state&code=invalid-code",
         expected=500,
     )
     expect(results, "youtube auth callback invalid state", "Authorization failed" in invalid_callback.text, invalid_callback.text)
 
-    tasks = json_request("GET", f"{YT_BASE}/tasks", expected=200)
+    tasks = json_request("GET", f"{yt_base}/tasks", expected=200)
     expect(results, "youtube tasks list", "tasks" in tasks)
 
     search = json_request(
         "POST",
-        f"{YT_BASE}/search",
+        f"{yt_base}/search",
         expected=200,
         json={"query": "Rick Astley Never Gonna Give You Up", "max_results": 3},
     )
@@ -511,30 +519,30 @@ def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
 
     download_task = json_request(
         "POST",
-        f"{YT_BASE}/download",
+        f"{yt_base}/download",
         expected=200,
         json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "format": "worst[ext=mp4]/worst"},
     )
-    download_status = wait_for_task(download_task["task_id"], timeout_seconds=240)
+    download_status = wait_for_task(yt_base, download_task["task_id"], timeout_seconds=240)
     expect(results, "youtube download task", download_status["status"] == "completed", json.dumps(download_status))
     downloaded_filename = download_status["result"]["filename"]
     cleanup["yt_downloads"].append(downloaded_filename)
 
-    downloads = json_request("GET", f"{YT_BASE}/downloads", expected=200)
+    downloads = json_request("GET", f"{yt_base}/downloads", expected=200)
     expect(results, "youtube downloads list", any(item["filename"] == downloaded_filename for item in downloads["files"]), downloaded_filename)
-    response = request("GET", f"{YT_BASE}/download/{downloaded_filename}", expected=200)
+    response = request("GET", f"{yt_base}/download/{downloaded_filename}", expected=200)
     expect(results, "youtube download file", response.headers.get("content-type", "").startswith("video/"), response.headers.get("content-type", ""))
 
     token_backup = YT_TOKEN_FILE.read_bytes() if YT_TOKEN_FILE.exists() else None
     quota_backup = YT_QUOTA_FILE.read_bytes() if YT_QUOTA_FILE.exists() else None
     try:
-        logout = json_request("POST", f"{YT_BASE}/auth/logout", expected=200)
+        logout = json_request("POST", f"{yt_base}/auth/logout", expected=200)
         expect(results, "youtube auth logout", logout["message"] == "Logged out successfully", json.dumps(logout))
-        logged_out_status = json_request("GET", f"{YT_BASE}/auth/status", expected=200)
+        logged_out_status = json_request("GET", f"{yt_base}/auth/status", expected=200)
         expect(results, "youtube logged out status", logged_out_status["authenticated"] is False, json.dumps(logged_out_status))
     finally:
         restore_token(token_backup)
-        restored_status = json_request("GET", f"{YT_BASE}/auth/status", expected=200)
+        restored_status = json_request("GET", f"{yt_base}/auth/status", expected=200)
         expect(results, "youtube auth restore token", restored_status["authenticated"] is True, json.dumps(restored_status))
 
     try:
@@ -543,7 +551,7 @@ def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
         with video_path.open("rb") as f:
             upload_task = json_request(
                 "POST",
-                f"{YT_BASE}/upload",
+                f"{yt_base}/upload",
                 expected=200,
                 files={"file": ("vp_smoke.mp4", f, "video/mp4")},
                 data={
@@ -553,7 +561,7 @@ def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
                     "privacy_status": "private",
                 },
             )
-        upload_status = wait_for_task(upload_task["task_id"], timeout_seconds=600)
+        upload_status = wait_for_task(yt_base, upload_task["task_id"], timeout_seconds=600)
         expect(results, "youtube upload", upload_status["status"] == "completed", json.dumps(upload_status))
         uploaded_video_id = upload_status["result"]["video_id"]
         cleanup["yt_videos"].append(uploaded_video_id)
@@ -563,7 +571,7 @@ def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
         cleanup["yt_downloads"].append(local_copy.name)
         local_upload_task = json_request(
             "POST",
-            f"{YT_BASE}/upload/local",
+            f"{yt_base}/upload/local",
             expected=200,
             json={
                 "filename": local_copy.name,
@@ -573,7 +581,7 @@ def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
                 "privacy_status": "private",
             },
         )
-        local_upload_status = wait_for_task(local_upload_task["task_id"], timeout_seconds=600)
+        local_upload_status = wait_for_task(yt_base, local_upload_task["task_id"], timeout_seconds=600)
         expect(results, "youtube upload local", local_upload_status["status"] == "completed", json.dumps(local_upload_status))
         cleanup["yt_videos"].append(local_upload_status["result"]["video_id"])
     finally:
@@ -582,13 +590,15 @@ def run_youtube_smoke(results: list[dict], cleanup: dict) -> None:
 
 def cleanup_resources(cleanup: dict) -> None:
     print_step("cleaning up smoke resources")
+    yt_base = cleanup.get("yt_base")
 
     for video_id in cleanup["yt_videos"]:
         delete_youtube_video(video_id)
 
     for filename in cleanup["yt_downloads"]:
         try:
-            request("DELETE", f"{YT_BASE}/download/{filename}", expected=200)
+            if yt_base:
+                request("DELETE", f"{yt_base}/download/{filename}", expected=200)
         except Exception:
             pass
 

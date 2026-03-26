@@ -1,5 +1,7 @@
 from __future__ import annotations
+import asyncio
 import io
+import os
 from typing import BinaryIO
 
 from app.storage.base import StorageBackend
@@ -16,27 +18,37 @@ class MinioStorageBackend(StorageBackend):
             self.client.make_bucket(bucket)
 
     async def save(self, path: str, data: BinaryIO) -> int:
+        local_path = getattr(data, "name", None)
+        if isinstance(local_path, str) and local_path and os.path.exists(local_path):
+            size = os.path.getsize(local_path)
+            await asyncio.to_thread(self.client.fput_object, self.bucket, path, local_path)
+            return size
+
         content = data.read()
         size = len(content)
-        self.client.put_object(
-            self.bucket, path, io.BytesIO(content), length=size,
+        await asyncio.to_thread(
+            self.client.put_object,
+            self.bucket,
+            path,
+            io.BytesIO(content),
+            size,
         )
         return size
 
     async def read(self, path: str) -> bytes:
-        response = self.client.get_object(self.bucket, path)
+        response = await asyncio.to_thread(self.client.get_object, self.bucket, path)
         try:
-            return response.read()
+            return await asyncio.to_thread(response.read)
         finally:
             response.close()
             response.release_conn()
 
     async def delete(self, path: str) -> None:
-        self.client.remove_object(self.bucket, path)
+        await asyncio.to_thread(self.client.remove_object, self.bucket, path)
 
     async def exists(self, path: str) -> bool:
         try:
-            self.client.stat_object(self.bucket, path)
+            await asyncio.to_thread(self.client.stat_object, self.bucket, path)
             return True
         except Exception:
             return False

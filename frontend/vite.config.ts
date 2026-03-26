@@ -13,9 +13,8 @@ export default defineConfig({
         ws: true,
       },
       '/youtube': {
-        target: 'http://localhost:8899',
+        target: 'http://localhost:3001',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/youtube/, ''),
       },
     },
   },

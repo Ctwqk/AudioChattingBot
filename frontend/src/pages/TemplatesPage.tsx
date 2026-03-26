@@ -4,6 +4,7 @@ import axios from 'axios';
 import apiClient from '../api/client';
 import type { Pipeline } from '../api/types';
 import BatchExecuteModal, { buildBatchExample, parseBatchItems } from '../components/batch/BatchExecuteModal';
+import { hasPlannerNodes } from '../utils/plannerBatch';
 
 export default function TemplatesPage() {
   const [templates, setTemplates] = useState<Pipeline[]>([]);
@@ -38,8 +39,14 @@ export default function TemplatesPage() {
   const openBatchRun = (template: Pipeline) => {
     setMessage(null);
     setBatchInputError(null);
-    setBatchTemplate(template);
-    setBatchInputText(JSON.stringify(buildBatchExample(template.definition), null, 2));
+    try {
+      setBatchTemplate(template);
+      setBatchInputText(JSON.stringify(buildBatchExample(template.definition), null, 2));
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Failed to build batch input';
+      setMessage({ type: 'error', text });
+      setBatchTemplate(null);
+    }
   };
 
   const closeBatchRun = () => {
@@ -97,7 +104,15 @@ export default function TemplatesPage() {
   };
 
   return (
-    <div style={{ padding: 24, color: '#e2e8f0', overflowY: 'auto', height: '100%' }}>
+    <div
+      style={{
+        padding: 24,
+        color: '#e2e8f0',
+        overflowY: 'auto',
+        height: '100%',
+        backgroundColor: '#020617',
+      }}
+    >
       <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>Templates</h1>
       {message && (
         <div style={{
@@ -205,7 +220,9 @@ export default function TemplatesPage() {
       {batchTemplate && (
         <BatchExecuteModal
           title={batchTemplate.name}
-          description="Submit a JSON array of parameter dictionaries to the template batch API."
+          description={hasPlannerNodes(batchTemplate.definition)
+            ? 'Planner nodes generated these batch items from the template’s saved search selections.'
+            : 'Submit a JSON array of parameter dictionaries to the template batch API.'}
           value={batchInputText}
           submitting={runningBatch}
           error={batchInputError}

@@ -22,13 +22,15 @@ from worker.handlers.base import CancelledError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("worker")
 
-TASK_STREAM = "vp:tasks:ffmpeg"
+WORKER_TYPE = os.environ.get("WORKER_TYPE", "ffmpeg").strip() or "ffmpeg"
+TASK_STREAM = f"vp:tasks:{WORKER_TYPE}"
 EVENT_STREAM = "vp:events"
-CONSUMER_GROUP = "ffmpeg-workers"
-WORKER_ID = f"ffmpeg-worker-{os.getpid()}"
+CONSUMER_GROUP = f"{WORKER_TYPE}-workers"
+WORKER_ID = f"{WORKER_TYPE}-worker-{os.getpid()}"
 
 PEL_RECLAIM_INTERVAL = 60  # seconds between periodic PEL reclaims
-PEL_MIN_IDLE = 30000       # ms a message must be idle before reclaim
+PEL_MIN_IDLE = int(os.environ.get("WORKER_PEL_MIN_IDLE_MS", "900000"))
+HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SECONDS", "15"))
 
 # DB session for worker
 engine_db = create_async_engine(settings.database_url, echo=False)
@@ -64,8 +66,6 @@ async def process_task(data: dict) -> None:
     if not handler_cls:
         await _report_failure(job_id, node_execution_id, f"No handler for node type: {node_type}")
         return
-
-    storage = get_storage()
 
     # Check if cancelled before starting, then update status to RUNNING
     async with worker_session() as db:
@@ -106,6 +106,7 @@ async def process_task(data: dict) -> None:
                 artifact = await db.get(Artifact, uuid.UUID(artifact_id_str))
                 if not artifact:
                     raise FileNotFoundError(f"Input artifact {artifact_id_str} not found")
+                storage = get_storage(artifact.storage_backend)
                 local_path = storage.get_local_path(artifact.storage_path)
                 if not local_path:
                     # MinIO or remote storage: download to temp file
@@ -130,8 +131,8 @@ async def process_task(data: dict) -> None:
         # Start cancel watcher
         cancel_check_task = asyncio.create_task(_cancel_watcher())
 
-        # Execute handler. Some handlers return artifact metadata for richer job results.
-        handler_metadata = await handler.execute(config, input_paths, output_local_path)
+        # Execute handler. Some handlers return artifact metadata and storage hints.
+        handler_result = await handler.execute(config, input_paths, output_local_path)
 
         # Verify output exists
         if not os.path.exists(output_local_path):
@@ -139,10 +140,24 @@ async def process_task(data: dict) -> None:
 
         file_size = os.path.getsize(output_local_path)
 
-        # If using remote storage (MinIO), upload the output file
-        if settings.storage_backend != "local":
+        artifact_storage_backend = settings.storage_backend
+        artifact_storage_path = output_storage_path if settings.storage_backend != "local" else str(output_local_path)
+        artifact_media_info = handler_result if isinstance(handler_result, dict) else None
+        skip_upload = False
+
+        if isinstance(handler_result, dict):
+            artifact_media_info = {k: v for k, v in handler_result.items() if not k.startswith("_")}
+            storage_path_override = handler_result.get("_storage_path")
+            if storage_path_override:
+                artifact_storage_path = str(storage_path_override)
+            skip_upload = bool(handler_result.get("_skip_upload", False))
+
+        # If using remote storage (MinIO), upload the output file unless the handler
+        # already persisted the exact object and returned a storage-path override.
+        output_storage = get_storage(settings.storage_backend)
+        if settings.storage_backend != "local" and not skip_upload:
             with open(output_local_path, "rb") as f:
-                await storage.save(output_storage_path, f)
+                await output_storage.save(artifact_storage_path, f)
 
         # Create artifact record
         async with worker_session() as db:
@@ -153,9 +168,9 @@ async def process_task(data: dict) -> None:
                 filename=output_filename,
                 mime_type=_guess_mime(output_ext),
                 file_size=file_size,
-                storage_backend=settings.storage_backend,
-                storage_path=output_storage_path if settings.storage_backend != "local" else str(output_local_path),
-                media_info=handler_metadata if isinstance(handler_metadata, dict) else None,
+                storage_backend=artifact_storage_backend,
+                storage_path=artifact_storage_path,
+                media_info=artifact_media_info,
             )
             db.add(artifact)
             await db.flush()
@@ -215,6 +230,10 @@ async def _report_failure(job_id: str, node_execution_id: str, error: str) -> No
 
 def _get_output_extension(node_type: str, config: dict) -> str:
     """Determine output file extension based on node type and config."""
+    if node_type in {"speech_to_subtitle", "subtitle_translate"}:
+        return ".srt"
+    if node_type == "subtitle_to_speech":
+        return ".wav"
     if node_type == "transcode":
         fmt = config.get("format", "mp4")
         return f".{fmt}"
@@ -231,6 +250,9 @@ def _guess_mime(ext: str) -> str:
         ".webm": "video/webm",
         ".avi": "video/x-msvideo",
         ".mov": "video/quicktime",
+        ".srt": "application/x-subrip",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
     }.get(ext, "video/mp4")
 
 
@@ -247,10 +269,42 @@ async def _reclaim_pending(r: aioredis.Redis) -> None:
             for msg_id, data in claimed[1]:
                 if data:
                     logger.info(f"Reclaimed pending task {msg_id}")
-                    await process_task(data)
-                    await r.xack(TASK_STREAM, CONSUMER_GROUP, msg_id)
+                    await _process_message(r, msg_id, data)
     except Exception:
         logger.exception("PEL reclaim failed")
+
+
+async def _heartbeat_message(r: aioredis.Redis, msg_id: str) -> None:
+    """Keep a long-running task fresh in the PEL so other workers do not reclaim it."""
+    while True:
+        try:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            await r.xclaim(
+                TASK_STREAM,
+                CONSUMER_GROUP,
+                WORKER_ID,
+                min_idle_time=0,
+                message_ids=[msg_id],
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Heartbeat failed for task %s", msg_id)
+
+
+async def _process_message(r: aioredis.Redis, msg_id: str, data: dict) -> None:
+    heartbeat_task = asyncio.create_task(_heartbeat_message(r, msg_id))
+    try:
+        await process_task(data)
+    except Exception:
+        logger.exception(f"Unhandled error processing {msg_id}")
+    finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        await r.xack(TASK_STREAM, CONSUMER_GROUP, msg_id)
 
 
 async def main() -> None:
@@ -300,11 +354,8 @@ async def main() -> None:
 
                         async def _run(mid=msg_id, d=data):
                             try:
-                                await process_task(d)
-                            except Exception:
-                                logger.exception(f"Unhandled error processing {mid}")
+                                await _process_message(r, mid, d)
                             finally:
-                                await r.xack(TASK_STREAM, CONSUMER_GROUP, mid)
                                 semaphore.release()
 
                         asyncio.create_task(_run())
