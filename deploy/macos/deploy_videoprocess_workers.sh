@@ -47,6 +47,14 @@ select_worker_targets() {
 
 install_vp_worker() {
   local target="$1"
+  local worker_host=""
+  if [ "$target" = "$MAC1_TARGET" ]; then
+    worker_host="wenjie"
+  elif [ "$target" = "$MAC2_TARGET" ]; then
+    worker_host="magi2"
+  else
+    worker_host="$(echo "$target" | cut -d@ -f1)"
+  fi
   local minimax_api_key=""
   local minimax_api_key_b64=""
   minimax_api_key="$(kubectl get secret minimax-credentials -n constructure-monitor -o jsonpath='{.data.api-key}' 2>/dev/null | base64 -d 2>/dev/null || true)"
@@ -81,15 +89,19 @@ MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET=videoprocess
 WORKER_TYPE=ffmpeg
+WORKER_HOST=$worker_host
 WORKER_CONCURRENCY=1
 WORKER_PEL_MIN_IDLE_MS=900000
 WORKER_HEARTBEAT_INTERVAL_SECONDS=15
+WORKER_AFFINITY_WAIT_SECONDS=20
+WORKER_AFFINITY_MAX_BOUNCES=6
 VIDEO_USE_GPU=false
 VIDEO_USE_VIDEOTOOLBOX=true
 VIDEO_WHISPER_DEVICE=cpu
 VIDEO_WHISPER_COMPUTE_TYPE=int8
 VIDEO_LLM_BASE_URL=http://$MAIN_HOST:8000/v1
-VIDEO_TTS_BASE_URL=http://$MAIN_HOST:8010
+VIDEO_TTS_BASE_URL=http://127.0.0.1:8010
+VIDEO_TTS_FALLBACK_BASE_URL=http://$MAIN_HOST:8010
 MINIMAX_API_KEY=\$minimax_api_key
 VIDEO_MINIMAX_TTS_BASE_URL=https://api.minimaxi.com/v1
 VIDEO_MINIMAX_TTS_MODEL=speech-2.8-hd

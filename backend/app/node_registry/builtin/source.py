@@ -6,7 +6,14 @@ DEFINITION = NodeTypeDefinition(
     category="source",
     description="Input source referencing an uploaded asset",
     icon="upload",
-    inputs=[],
+    inputs=[
+        PortDefinition(
+            name="asset_input",
+            port_type=PortType.ASSET_VALUE,
+            required=False,
+            description="Optional planner-provided asset reference",
+        ),
+    ],
     outputs=[
         PortDefinition(name="output", port_type=PortType.ANY_MEDIA, description="Source media output"),
     ],

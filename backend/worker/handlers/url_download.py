@@ -67,7 +67,7 @@ class UrlDownloadHandler(BaseHandler):
             raise CancelledError("Cancelled during download")
         if self._proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace")
-            raise RuntimeError(f"yt-dlp failed (exit {self._proc.returncode}):\n{stderr_text[-2000:]}")
+            raise RuntimeError(self._format_download_error(self._normalize_url(url), self._proc.returncode, stderr_text))
 
         await self._save_to_cache(cache_path, output_path)
         return {
@@ -131,3 +131,72 @@ class UrlDownloadHandler(BaseHandler):
             return
         with open(output_path, "rb") as f:
             await storage.save(cache_path, f)
+
+    @staticmethod
+    def _format_download_error(url: str, exit_code: int, stderr_text: str) -> str:
+        lowered = stderr_text.lower()
+        details = UrlDownloadHandler._trim_error_details(stderr_text)
+
+        if "sign in to confirm you’re not a bot" in lowered or "sign in to confirm you're not a bot" in lowered:
+            return (
+                "URL Download failed: YouTube is rate-limiting or bot-checking this request.\n"
+                f"URL: {url}\n"
+                "Category: rate_limited\n"
+                f"Details:\n{details}"
+            )
+
+        if "http error 429" in lowered or "too many requests" in lowered:
+            return (
+                "URL Download failed: YouTube returned Too Many Requests.\n"
+                f"URL: {url}\n"
+                "Category: rate_limited\n"
+                f"Details:\n{details}"
+            )
+
+        if "private video" in lowered or "this is a private video" in lowered:
+            return (
+                "URL Download failed: this video is private.\n"
+                f"URL: {url}\n"
+                "Category: private_video\n"
+                f"Details:\n{details}"
+            )
+
+        if "members-only" in lowered or "members only" in lowered:
+            return (
+                "URL Download failed: this video is members-only.\n"
+                f"URL: {url}\n"
+                "Category: membership_restricted\n"
+                f"Details:\n{details}"
+            )
+
+        if "video unavailable" in lowered or "this video is not available" in lowered:
+            return (
+                "URL Download failed: video unavailable or non-video YouTube result.\n"
+                f"URL: {url}\n"
+                "Category: unavailable_video\n"
+                "Hint: this often means the search result was deleted, made private, region/age restricted, "
+                "or was actually a channel/playlist result instead of a real video.\n"
+                f"Details:\n{details}"
+            )
+
+        if "unsupported url" in lowered or "unsupported url:" in lowered:
+            return (
+                "URL Download failed: unsupported URL.\n"
+                f"URL: {url}\n"
+                "Category: unsupported_url\n"
+                f"Details:\n{details}"
+            )
+
+        return (
+            f"yt-dlp failed (exit {exit_code}).\n"
+            f"URL: {url}\n"
+            "Category: unknown_download_error\n"
+            f"Details:\n{details}"
+        )
+
+    @staticmethod
+    def _trim_error_details(stderr_text: str) -> str:
+        lines = [line.rstrip() for line in stderr_text.splitlines() if line.strip()]
+        if not lines:
+            return "(no stderr output)"
+        return "\n".join(lines[-12:])

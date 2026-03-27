@@ -51,6 +51,7 @@ class NodeTypeRegistry:
             concat_horizontal,
             concat_vertical,
             concat_timeline,
+            concat_vertical_timeline,
             trim,
             watermark,
             subtitle,
@@ -61,14 +62,16 @@ class NodeTypeRegistry:
             replace_audio,
             transcode,
             url_download,
+            material_library_ingest,
+            material_search,
             youtube_search,
             zip_records,
             export,
             youtube_upload,
         )
         for mod in [
-            source, concat_horizontal, concat_vertical, concat_timeline,
+            source, concat_horizontal, concat_vertical, concat_timeline, concat_vertical_timeline,
             trim, watermark, subtitle, speech_to_subtitle, subtitle_translate, subtitle_to_speech, bgm, replace_audio, transcode,
-            url_download, youtube_search, zip_records, export, youtube_upload,
+            url_download, material_library_ingest, material_search, youtube_search, zip_records, export, youtube_upload,
         ]:
             self.register(mod.DEFINITION)

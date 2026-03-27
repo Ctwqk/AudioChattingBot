@@ -21,6 +21,7 @@ class YouTubeUploadHandler(BaseHandler):
         title = node_config.get("title", "Untitled")
         description = node_config.get("description", "")
         privacy = node_config.get("privacy", "private")
+        made_for_kids = str(node_config.get("made_for_kids", "not_set") or "not_set").strip().lower()
         tags_str = node_config.get("tags", "")
         tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
 
@@ -38,7 +39,7 @@ class YouTubeUploadHandler(BaseHandler):
             )
 
         upload_result = await self._upload_youtube(
-            input_file, title, description, privacy, tags, cred_dir, client_secret
+            input_file, title, description, privacy, made_for_kids, tags, cred_dir, client_secret
         )
 
         # Copy input to output_path for artifact tracking
@@ -93,7 +94,7 @@ class YouTubeUploadHandler(BaseHandler):
         self._save_quota_usage(cred_dir, data)
 
     async def _upload_youtube(
-        self, video_path, title, description, privacy, tags, cred_dir, client_secret
+        self, video_path, title, description, privacy, made_for_kids, tags, cred_dir, client_secret
     ):
         """Upload using google-api-python-client."""
         try:
@@ -143,6 +144,10 @@ class YouTubeUploadHandler(BaseHandler):
                 "privacyStatus": privacy,
             },
         }
+        if made_for_kids == "yes":
+            body["status"]["selfDeclaredMadeForKids"] = True
+        elif made_for_kids == "no":
+            body["status"]["selfDeclaredMadeForKids"] = False
 
         media = MediaFileUpload(video_path, mimetype="video/*", resumable=True)
         request = youtube.videos().insert(
@@ -168,6 +173,11 @@ class YouTubeUploadHandler(BaseHandler):
             "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else None,
             "title": title,
             "privacy": privacy,
+            "made_for_kids": (
+                True if made_for_kids == "yes"
+                else False if made_for_kids == "no"
+                else None
+            ),
             "tags": tags,
             "quota_cost_estimate": UPLOAD_INSERT_COST,
         }

@@ -137,6 +137,9 @@ def create_app() -> FastAPI:
     from app.api.llm import router as llm_router
     app.include_router(llm_router)
 
+    from app.api.materials import router as materials_router
+    app.include_router(materials_router)
+
     @app.get("/health")
     async def health():
         return {"status": "ok"}

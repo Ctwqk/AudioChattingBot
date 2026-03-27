@@ -3,15 +3,26 @@ import type { PipelineDefinition, PipelineNode } from '../api/types';
 export type PlannerSearchResult = {
   id: string;
   title: string;
-  url: string;
+  url?: string;
+  asset_id?: string;
   thumbnail?: string | null;
   duration?: number | null;
   channel?: string | null;
+  subtitle_text?: string | null;
+  source_asset_id?: string | null;
+  library_id?: string | null;
+  start_sec?: number | null;
+  end_sec?: number | null;
+  coarse_score?: number | null;
+  lighthouse_score?: number | null;
+  confidence?: number | null;
 };
 
 const SEARCH_NODE_TYPE = 'youtube_search';
+const MATERIAL_SEARCH_NODE_TYPE = 'material_search';
 const ZIP_NODE_TYPE = 'zip_records';
 const URL_DOWNLOAD_NODE_TYPE = 'url_download';
+const SOURCE_NODE_TYPE = 'source';
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -25,14 +36,23 @@ function asSearchResults(value: unknown): PlannerSearchResult[] {
   }
   return value
     .map(item => asObject(item))
-    .filter(item => typeof item.id === 'string' && typeof item.url === 'string')
+    .filter(item => typeof item.id === 'string' && (typeof item.url === 'string' || typeof item.asset_id === 'string'))
     .map(item => ({
       id: String(item.id),
-      title: String(item.title || item.url),
-      url: String(item.url),
+      title: String(item.title || item.url || item.asset_id || item.id),
+      url: typeof item.url === 'string' ? String(item.url) : undefined,
+      asset_id: typeof item.asset_id === 'string' ? String(item.asset_id) : undefined,
       thumbnail: typeof item.thumbnail === 'string' ? item.thumbnail : null,
       duration: typeof item.duration === 'number' ? item.duration : null,
       channel: typeof item.channel === 'string' ? item.channel : null,
+      subtitle_text: typeof item.subtitle_text === 'string' ? item.subtitle_text : null,
+      source_asset_id: typeof item.source_asset_id === 'string' ? item.source_asset_id : null,
+      library_id: typeof item.library_id === 'string' ? item.library_id : null,
+      start_sec: typeof item.start_sec === 'number' ? item.start_sec : null,
+      end_sec: typeof item.end_sec === 'number' ? item.end_sec : null,
+      coarse_score: typeof item.coarse_score === 'number' ? item.coarse_score : null,
+      lighthouse_score: typeof item.lighthouse_score === 'number' ? item.lighthouse_score : null,
+      confidence: typeof item.confidence === 'number' ? item.confidence : null,
     }));
 }
 
@@ -59,7 +79,11 @@ function getSelectedSearchResults(node: PipelineNode): PlannerSearchResult[] {
   const results = asSearchResults(config.search_results);
   const selectedIds = Array.isArray(config.selected_video_ids)
     ? config.selected_video_ids.map(String)
-    : [];
+    : Array.isArray(config.selected_result_ids)
+      ? config.selected_result_ids.map(String)
+      : Array.isArray(config.selected_material_result_ids)
+        ? config.selected_material_result_ids.map(String)
+        : [];
 
   if (selectedIds.length === 0) {
     return results;
@@ -97,7 +121,7 @@ function mergeItemSets(itemSets: Array<Array<Record<string, unknown>>>): Array<R
 }
 
 export function hasPlannerNodes(definition: PipelineDefinition): boolean {
-  return definition.nodes.some(node => node.type === SEARCH_NODE_TYPE || node.type === ZIP_NODE_TYPE);
+  return definition.nodes.some(node => node.type === SEARCH_NODE_TYPE || node.type === MATERIAL_SEARCH_NODE_TYPE || node.type === ZIP_NODE_TYPE);
 }
 
 export function buildPlannerBatchItems(definition: PipelineDefinition): Array<Record<string, unknown>> {
@@ -123,8 +147,8 @@ export function buildPlannerBatchItems(definition: PipelineDefinition): Array<Re
         throw new Error(`${zipNode.data.label || 'Zip Records'} is missing ${inputHandle}.`);
       }
       const sourceNode = nodesById.get(inputEdge.source);
-      if (!sourceNode || sourceNode.type !== SEARCH_NODE_TYPE) {
-        throw new Error(`${zipNode.data.label || 'Zip Records'} ${inputHandle} must come from a YouTube Search node.`);
+      if (!sourceNode || (sourceNode.type !== SEARCH_NODE_TYPE && sourceNode.type !== MATERIAL_SEARCH_NODE_TYPE)) {
+        throw new Error(`${zipNode.data.label || 'Zip Records'} ${inputHandle} must come from a planner search node.`);
       }
 
       const selected = getSelectedSearchResults(sourceNode);
@@ -138,8 +162,8 @@ export function buildPlannerBatchItems(definition: PipelineDefinition): Array<Re
         throw new Error(`${zipNode.data.label || 'Zip Records'} is missing ${outputHandle}.`);
       }
       const targetNode = nodesById.get(outputEdge.target);
-      if (!targetNode || targetNode.type !== URL_DOWNLOAD_NODE_TYPE) {
-        throw new Error(`${zipNode.data.label || 'Zip Records'} ${outputHandle} must connect to a URL Download node.`);
+      if (!targetNode || (targetNode.type !== URL_DOWNLOAD_NODE_TYPE && targetNode.type !== SOURCE_NODE_TYPE)) {
+        throw new Error(`${zipNode.data.label || 'Zip Records'} ${outputHandle} must connect to a URL Download or Source node.`);
       }
       downloadTargets.push(targetNode.id);
     }
@@ -155,7 +179,22 @@ export function buildPlannerBatchItems(definition: PipelineDefinition): Array<Re
     return Array.from({ length: count }, (_, rowIndex) => {
       const item: Record<string, unknown> = {};
       channels.forEach((channel, channelIndex) => {
-        item[`${downloadTargets[channelIndex]}.url`] = channel[rowIndex].url;
+        const outputEdge = definition.edges.find(edge => edge.source === zipNode.id && edge.sourceHandle === `output_${channelIndex + 1}`);
+        const targetNode = outputEdge ? nodesById.get(outputEdge.target) : undefined;
+        const result = channel[rowIndex];
+        if (targetNode?.type === URL_DOWNLOAD_NODE_TYPE) {
+          if (!result.url) {
+            throw new Error(`Planner result '${result.title}' has no URL for URL Download.`);
+          }
+          item[`${downloadTargets[channelIndex]}.url`] = result.url;
+          return;
+        }
+        if (targetNode?.type === SOURCE_NODE_TYPE) {
+          if (!result.asset_id) {
+            throw new Error(`Planner result '${result.title}' has no asset_id for Source injection.`);
+          }
+          item[`${downloadTargets[channelIndex]}.asset_id`] = result.asset_id;
+        }
       });
       return item;
     });

@@ -1,7 +1,9 @@
 from __future__ import annotations
 import json
 import logging
+import time
 import uuid
+from collections import Counter
 from datetime import datetime
 
 import redis.asyncio as aioredis
@@ -24,6 +26,18 @@ TASK_STREAM = "vp:tasks:{worker_type}"
 EVENT_STREAM = "vp:events"
 CONSUMER_GROUP = "orchestrator"
 CONSUMER_NAME = "orchestrator-1"
+
+
+def _extract_worker_host(worker_id: str | None) -> str | None:
+    if not worker_id:
+        return None
+    marker = "worker@"
+    if marker not in worker_id:
+        return None
+    suffix = worker_id.split(marker, 1)[1]
+    host, _, _rest = suffix.partition(":")
+    host = host.strip()
+    return host or None
 
 
 def _redis() -> aioredis.Redis:
@@ -137,7 +151,12 @@ class JobEngine:
                 file_size=asset.file_size,
                 storage_backend=asset.storage_backend,
                 storage_path=asset.storage_path,
-                media_info=asset.media_info,
+                media_info={
+                    **(asset.media_info or {}),
+                    "source_asset_id": str(asset.id),
+                    "asset_id": str(asset.id),
+                    "original_name": asset.original_name,
+                },
             )
             db.add(artifact)
             await db.flush()
@@ -178,6 +197,7 @@ class JobEngine:
                 # Resolve input artifacts from upstream nodes
                 definition = PipelineDefinition.model_validate(job.pipeline_snapshot)
                 input_artifacts = {}
+                preferred_hosts = self._preferred_hosts_for_node(ne_by_node_id, deps)
                 for edge in definition.edges:
                     if edge.target == node_id:
                         upstream_ne = ne_by_node_id.get(edge.source)
@@ -204,12 +224,35 @@ class JobEngine:
                     "node_type": ne.node_type,
                     "config": json.dumps(ne.node_config),
                     "input_artifacts": json.dumps(input_artifacts),
+                    "preferred_hosts": json.dumps(preferred_hosts),
+                    "affinity_enqueued_at": str(int(time.time())),
+                    "affinity_bounces": "0",
                 }
                 stream_key = TASK_STREAM.format(worker_type=worker_type)
                 await r.xadd(stream_key, task)
-                logger.info(f"Dispatched node {ne.node_id} (type={ne.node_type}) to {stream_key} for job {job.id}")
+                logger.info(
+                    "Dispatched node %s (type=%s) to %s for job %s with preferred_hosts=%s",
+                    ne.node_id, ne.node_type, stream_key, job.id, preferred_hosts,
+                )
         finally:
             await r.aclose()
+
+    @staticmethod
+    def _preferred_hosts_for_node(
+        ne_by_node_id: dict[str, NodeExecution],
+        deps: list[str],
+    ) -> list[str]:
+        counts: Counter[str] = Counter()
+        for dep_id in deps:
+            upstream_ne = ne_by_node_id.get(dep_id)
+            host = _extract_worker_host(upstream_ne.worker_id if upstream_ne else None)
+            if host:
+                counts[host] += 1
+        if not counts:
+            return []
+        ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        top_count = ranked[0][1]
+        return [host for host, count in ranked if count == top_count]
 
     async def on_node_completed(
         self, job_id: uuid.UUID, node_execution_id: uuid.UUID, output_artifact_id: uuid.UUID

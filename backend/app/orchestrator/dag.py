@@ -1,6 +1,7 @@
 from __future__ import annotations
 from collections import defaultdict, deque
 from app.orchestrator.planner import (
+    ASSET_INPUT_HANDLE,
     SEARCH_RESULTS_HANDLE,
     URL_INPUT_HANDLE,
     get_zip_channel_count,
@@ -49,6 +50,15 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
         and nodes_by_id[edge.source].type == "zip_records"
         and nodes_by_id[edge.target].type == "url_download"
         and edge.targetHandle == URL_INPUT_HANDLE
+    }
+    planner_bound_source_nodes = {
+        edge.target
+        for edge in definition.edges
+        if nodes_by_id.get(edge.source)
+        and nodes_by_id.get(edge.target)
+        and nodes_by_id[edge.source].type == "zip_records"
+        and nodes_by_id[edge.target].type == "source"
+        and edge.targetHandle == ASSET_INPUT_HANDLE
     }
 
     # 1. Check all node types exist
@@ -111,9 +121,9 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
         if not src_node or not tgt_node:
             continue
 
-        if src_node.type == "youtube_search" or tgt_node.type == "zip_records" or src_node.type == "zip_records":
+        if src_node.type in {"youtube_search", "material_search"} or tgt_node.type == "zip_records" or src_node.type == "zip_records":
             planner_valid = False
-            if src_node.type == "youtube_search" and tgt_node.type == "zip_records":
+            if src_node.type in {"youtube_search", "material_search"} and tgt_node.type == "zip_records":
                 channel_count = get_zip_channel_count(tgt_node.data.config)
                 planner_valid = (
                     edge.sourceHandle == SEARCH_RESULTS_HANDLE
@@ -124,6 +134,12 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
                 planner_valid = (
                     is_zip_output_handle(edge.sourceHandle, channel_count)
                     and edge.targetHandle == URL_INPUT_HANDLE
+                )
+            elif src_node.type == "zip_records" and tgt_node.type == "source":
+                channel_count = get_zip_channel_count(src_node.data.config)
+                planner_valid = (
+                    is_zip_output_handle(edge.sourceHandle, channel_count)
+                    and edge.targetHandle == ASSET_INPUT_HANDLE
                 )
             if not planner_valid:
                 errors.append(ValidationError(
@@ -216,7 +232,7 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
     for edge in definition.edges:
         has_outgoing.add(edge.source)
 
-    terminal_types = {"transcode"}
+    terminal_types = {"transcode", "material_library_ingest"}
     for node in definition.nodes:
         node_def = registry.get_type(node.type)
         if not node_def:
@@ -234,7 +250,7 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
     for node in definition.nodes:
         if node.type == "source":
             asset_id = node.data.config.get("asset_id") or node.data.asset_id
-            if not asset_id:
+            if not asset_id and node.id not in planner_bound_source_nodes:
                 errors.append(ValidationError(
                     type="missing_asset",
                     node_id=node.id,
@@ -255,6 +271,12 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
                 node.type == "url_download"
                 and param.name == "url"
                 and node.id in planner_bound_url_nodes
+            ):
+                continue
+            if (
+                node.type == "source"
+                and param.name == "asset_id"
+                and node.id in planner_bound_source_nodes
             ):
                 continue
 

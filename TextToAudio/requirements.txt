@@ -4,4 +4,3 @@ python-multipart==0.0.20
 TTS==0.22.0
 soundfile==0.13.1
 transformers==4.41.2
-f5-tts==1.1.18

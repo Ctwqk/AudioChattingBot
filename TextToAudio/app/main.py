@@ -16,17 +16,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import soundfile as sf
 from TTS.api import TTS
-from f5_tts.api import F5TTS
+import torch
 
 
 MODEL_NAME = os.getenv("XTTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
 USE_GPU = os.getenv("USE_GPU", "true").lower() in {"1", "true", "yes", "on"}
-F5_ENABLED = os.getenv("F5_TTS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-F5_MODEL = os.getenv("F5_TTS_MODEL", "F5TTS_v1_Base")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/output")
 DEFAULT_SPEAKER_WAV = os.getenv("DEFAULT_SPEAKER_WAV", "")
 SPEAKER_CACHE_DIR = os.getenv("SPEAKER_CACHE_DIR", "/app/voicesource/cache")
-PRIMARY_PROVIDER = os.getenv("PRIMARY_TTS_PROVIDER", "f5").strip().lower() or "f5"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(SPEAKER_CACHE_DIR, exist_ok=True)
@@ -36,9 +33,8 @@ logger = logging.getLogger(__name__)
 
 
 tts_engine: Optional[TTS] = None
-f5_engine: Optional[F5TTS] = None
+tts_engine_device: Optional[str] = None
 _xtts_lock = Lock()
-_f5_lock = Lock()
 SENTENCE_ENDINGS = {"。", "！", "？", ".", "!", "?", "\n"}
 
 
@@ -46,6 +42,7 @@ class HealthResp(BaseModel):
     status: str
     model: str
     gpu: bool
+    device: str
 
 
 def _speaker_meta_path(audio_path: str) -> Path:
@@ -67,32 +64,38 @@ def _save_speaker_meta(audio_path: str, meta: dict) -> None:
     meta_path.write_text(json.dumps(meta, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
+def resolve_tts_device() -> str:
+    configured_device = (os.environ.get("TTS_DEVICE", "auto") or "auto").strip().lower()
+    if configured_device in {"cpu", "cuda", "mps"}:
+        return configured_device
+    if USE_GPU and torch.cuda.is_available():
+        return "cuda"
+    if USE_GPU and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def get_xtts_engine() -> TTS:
-    global tts_engine
-    if tts_engine is not None:
+    global tts_engine, tts_engine_device
+    requested_device = resolve_tts_device()
+    if tts_engine is not None and tts_engine_device == requested_device:
         return tts_engine
     with _xtts_lock:
-        if tts_engine is not None:
+        if tts_engine is not None and tts_engine_device == requested_device:
             return tts_engine
         engine = TTS(MODEL_NAME)
-        if USE_GPU:
-            engine = engine.to("cuda")
+        if requested_device != "cpu":
+            engine = engine.to(requested_device)
         tts_engine = engine
-        logger.info("Loaded XTTS provider: %s", MODEL_NAME)
+        tts_engine_device = requested_device
+        logger.info("Loaded XTTS provider: %s on %s", MODEL_NAME, requested_device)
         return tts_engine
 
 
-def get_f5_engine() -> F5TTS:
-    global f5_engine
-    if f5_engine is not None:
-        return f5_engine
-    with _f5_lock:
-        if f5_engine is not None:
-            return f5_engine
-        device = "cuda" if USE_GPU else "cpu"
-        f5_engine = F5TTS(model=F5_MODEL, device=device)
-        logger.info("Loaded F5-TTS provider: %s on %s", F5_MODEL, device)
-        return f5_engine
+def reset_xtts_engine() -> None:
+    global tts_engine, tts_engine_device
+    tts_engine = None
+    tts_engine_device = None
 
 
 async def resolve_reference_audio(
@@ -159,53 +162,41 @@ def resolve_reference_path_for_ws(speaker_wav_path: Optional[str]) -> str:
 def synthesize_to_wav(text: str, language: str, ref_path: str, output_path: str) -> str:
     if not text.strip():
         raise HTTPException(status_code=400, detail="text is empty")
-    speaker_text = str(_load_speaker_meta(ref_path).get("speaker_text") or "").strip()
-    last_exc: Exception | None = None
-    providers: list[str] = []
-    if F5_ENABLED and PRIMARY_PROVIDER == "f5":
-        providers.extend(["f5", "xtts"])
-    elif F5_ENABLED:
-        providers.extend(["xtts", "f5"])
-    else:
-        providers.append("xtts")
-
-    for provider in providers:
-        try:
-            if provider == "f5":
-                engine = get_f5_engine()
-                ref_text = speaker_text or engine.transcribe(ref_path)
-                if ref_text and ref_text != speaker_text:
-                    _save_speaker_meta(ref_path, {"speaker_text": ref_text})
-                engine.infer(
-                    ref_file=ref_path,
-                    ref_text=ref_text,
-                    gen_text=text,
-                    file_wave=output_path,
-                    remove_silence=False,
+    try:
+        engine = get_xtts_engine()
+        engine.tts_to_file(
+            text=text,
+            speaker_wav=ref_path,
+            language=language,
+            file_path=output_path,
+        )
+        return "xtts"
+    except Exception as exc:
+        if resolve_tts_device() == "mps":
+            logger.warning("XTTS on mps failed; retrying on cpu: %s", exc)
+            original_device = (os.environ.get("TTS_DEVICE", "auto") or "auto").strip().lower()
+            try:
+                os.environ["TTS_DEVICE"] = "cpu"
+                reset_xtts_engine()
+                engine = get_xtts_engine()
+                engine.tts_to_file(
+                    text=text,
+                    speaker_wav=ref_path,
+                    language=language,
+                    file_path=output_path,
                 )
-                return "f5"
-
-            engine = get_xtts_engine()
-            engine.tts_to_file(
-                text=text,
-                speaker_wav=ref_path,
-                language=language,
-                file_path=output_path,
-            )
-            return "xtts"
-        except Exception as exc:
-            last_exc = exc
-            logger.warning("TTS provider %s failed, trying fallback: %s", provider, exc)
-
-    raise HTTPException(status_code=500, detail=f"tts failed: {last_exc}") from last_exc
+                return "xtts"
+            except Exception as cpu_exc:
+                raise HTTPException(status_code=500, detail=f"tts failed after mps->cpu fallback: {cpu_exc}") from cpu_exc
+            finally:
+                if original_device == "auto":
+                    os.environ.pop("TTS_DEVICE", None)
+                else:
+                    os.environ["TTS_DEVICE"] = original_device
+        raise HTTPException(status_code=500, detail=f"tts failed: {exc}") from exc
 
 
 def get_output_sample_rate() -> int:
-    if F5_ENABLED and PRIMARY_PROVIDER == "f5":
-        try:
-            return int(get_f5_engine().target_sample_rate)
-        except Exception:
-            pass
     if tts_engine is not None:
         sample_rate = getattr(tts_engine.synthesizer, "output_sample_rate", None)
         if isinstance(sample_rate, int) and sample_rate > 0:
@@ -256,17 +247,17 @@ def split_complete_sentences(buffer: str) -> Tuple[list[str], str]:
 @app.on_event("startup")
 def load_model() -> None:
     logger.info(
-        "TTS service starting with primary_provider=%s, f5_enabled=%s, use_gpu=%s",
-        PRIMARY_PROVIDER,
-        F5_ENABLED,
+        "TTS service starting with provider=xtts, use_gpu=%s, requested_device=%s, resolved_device=%s",
         USE_GPU,
+        (os.environ.get("TTS_DEVICE", "auto") or "auto").strip().lower(),
+        resolve_tts_device(),
     )
 
 
 @app.get("/health", response_model=HealthResp)
 def health() -> HealthResp:
-    model = F5_MODEL if F5_ENABLED and PRIMARY_PROVIDER == "f5" else MODEL_NAME
-    return HealthResp(status="ok", model=model, gpu=USE_GPU)
+    device = tts_engine_device or resolve_tts_device()
+    return HealthResp(status="ok", model=MODEL_NAME, gpu=device != "cpu", device=device)
 
 
 @app.post("/v1/tts")
@@ -331,12 +322,6 @@ async def register_speaker(
     cached_path = await cache_uploaded_speaker_wav(speaker_wav)
     speaker_id = Path(cached_path).stem
     normalized_text = str(speaker_text or "").strip()
-    if F5_ENABLED and not normalized_text:
-        try:
-            normalized_text = await asyncio.to_thread(get_f5_engine().transcribe, cached_path, None)
-        except Exception as exc:
-            logger.warning("F5 speaker transcription failed during registration: %s", exc)
-            normalized_text = ""
     _save_speaker_meta(cached_path, {"speaker_text": normalized_text})
     return {
         "speaker_id": speaker_id,

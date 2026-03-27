@@ -3,7 +3,9 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import tempfile
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -26,14 +28,23 @@ WORKER_TYPE = os.environ.get("WORKER_TYPE", "ffmpeg").strip() or "ffmpeg"
 TASK_STREAM = f"vp:tasks:{WORKER_TYPE}"
 EVENT_STREAM = "vp:events"
 CONSUMER_GROUP = f"{WORKER_TYPE}-workers"
-WORKER_ID = f"{WORKER_TYPE}-worker-{os.getpid()}"
+WORKER_HOST = os.environ.get("WORKER_HOST", socket.gethostname().split(".")[0]).strip() or "unknown"
+WORKER_ID = f"{WORKER_TYPE}-worker@{WORKER_HOST}:{os.getpid()}"
 
 PEL_RECLAIM_INTERVAL = 60  # seconds between periodic PEL reclaims
 PEL_MIN_IDLE = int(os.environ.get("WORKER_PEL_MIN_IDLE_MS", "900000"))
 HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SECONDS", "15"))
+AFFINITY_WAIT_SECONDS = int(os.environ.get("WORKER_AFFINITY_WAIT_SECONDS", "20"))
+AFFINITY_MAX_BOUNCES = int(os.environ.get("WORKER_AFFINITY_MAX_BOUNCES", "6"))
 
-# DB session for worker
-engine_db = create_async_engine(settings.database_url, echo=False)
+# DB session for worker. Remote Mac workers can hold idle DB connections long
+# enough for the server/network to close them, so we proactively ping/recycle.
+engine_db = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_pre_ping=True,
+    pool_recycle=300,
+)
 worker_session = async_sessionmaker(engine_db, expire_on_commit=False)
 
 
@@ -102,10 +113,12 @@ async def process_task(data: dict) -> None:
         # Resolve input artifact paths to local file paths
         input_paths: dict[str, str] = {}
         async with worker_session() as db:
+            input_artifact_meta: dict[str, dict] = {}
             for port_name, artifact_id_str in input_artifacts_map.items():
                 artifact = await db.get(Artifact, uuid.UUID(artifact_id_str))
                 if not artifact:
                     raise FileNotFoundError(f"Input artifact {artifact_id_str} not found")
+                input_artifact_meta[port_name] = artifact.media_info or {}
                 storage = get_storage(artifact.storage_backend)
                 local_path = storage.get_local_path(artifact.storage_path)
                 if not local_path:
@@ -119,6 +132,9 @@ async def process_task(data: dict) -> None:
                     local_path = tmp_path
                     temp_files.append(tmp_path)
                 input_paths[port_name] = local_path
+
+        config["_input_artifact_meta"] = input_artifact_meta
+        config["_input_artifact_ids"] = dict(input_artifacts_map)
 
         # Prepare output path
         output_ext = _get_output_extension(node_type, config)
@@ -234,6 +250,8 @@ def _get_output_extension(node_type: str, config: dict) -> str:
         return ".srt"
     if node_type == "subtitle_to_speech":
         return ".wav"
+    if node_type == "material_library_ingest":
+        return ".json"
     if node_type == "transcode":
         fmt = config.get("format", "mp4")
         return f".{fmt}"
@@ -247,6 +265,7 @@ def _guess_mime(ext: str) -> str:
     return {
         ".mp4": "video/mp4",
         ".mkv": "video/x-matroska",
+        ".json": "application/json",
         ".webm": "video/webm",
         ".avi": "video/x-msvideo",
         ".mov": "video/quicktime",
@@ -293,18 +312,85 @@ async def _heartbeat_message(r: aioredis.Redis, msg_id: str) -> None:
 
 
 async def _process_message(r: aioredis.Redis, msg_id: str, data: dict) -> None:
+    if await _maybe_defer_for_affinity(r, msg_id, data):
+        return
+
     heartbeat_task = asyncio.create_task(_heartbeat_message(r, msg_id))
+    should_ack = False
     try:
         await process_task(data)
+        should_ack = True
     except Exception:
         logger.exception(f"Unhandled error processing {msg_id}")
+        try:
+            await _report_failure(
+                data["job_id"],
+                data["node_execution_id"],
+                "Worker failed before task state could be updated. See worker logs for details.",
+            )
+            should_ack = True
+        except Exception:
+            logger.exception("Failed to report failure for %s; leaving message pending", msg_id)
     finally:
         heartbeat_task.cancel()
         try:
             await heartbeat_task
         except asyncio.CancelledError:
             pass
-        await r.xack(TASK_STREAM, CONSUMER_GROUP, msg_id)
+        if should_ack:
+            await r.xack(TASK_STREAM, CONSUMER_GROUP, msg_id)
+
+
+def _parse_preferred_hosts(data: dict) -> list[str]:
+    raw = data.get("preferred_hosts")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+async def _maybe_defer_for_affinity(r: aioredis.Redis, msg_id: str, data: dict) -> bool:
+    preferred_hosts = _parse_preferred_hosts(data)
+    if not preferred_hosts or WORKER_HOST in preferred_hosts:
+        return False
+
+    try:
+        enqueued_at = int(data.get("affinity_enqueued_at", "0") or "0")
+    except ValueError:
+        enqueued_at = 0
+    try:
+        bounces = int(data.get("affinity_bounces", "0") or "0")
+    except ValueError:
+        bounces = 0
+
+    now = int(time.time())
+    age_seconds = max(0, now - enqueued_at) if enqueued_at else 0
+
+    if bounces >= AFFINITY_MAX_BOUNCES or age_seconds >= AFFINITY_WAIT_SECONDS:
+        logger.info(
+            "Affinity relaxed for task %s on host %s (preferred=%s, age=%ss, bounces=%s)",
+            msg_id, WORKER_HOST, preferred_hosts, age_seconds, bounces,
+        )
+        return False
+
+    bounced = dict(data)
+    bounced["affinity_bounces"] = str(bounces + 1)
+    if not bounced.get("affinity_enqueued_at"):
+        bounced["affinity_enqueued_at"] = str(now)
+    await r.xadd(TASK_STREAM, bounced)
+    await r.xack(TASK_STREAM, CONSUMER_GROUP, msg_id)
+    logger.info(
+        "Deferred task %s on host %s for affinity (preferred=%s, age=%ss, bounce=%s)",
+        msg_id, WORKER_HOST, preferred_hosts, age_seconds, bounces + 1,
+    )
+    return True
 
 
 async def main() -> None:

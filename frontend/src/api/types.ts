@@ -76,6 +76,15 @@ export interface Asset {
   uploaded_at: string;
 }
 
+export interface MaterialLibrary {
+  id: string;
+  name: string;
+  description: string;
+  is_disabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 // Artifact types
 export type ArtifactKind = 'intermediate' | 'final';
 
@@ -93,7 +102,7 @@ export interface Artifact {
 // Node type registry
 export interface PortDefinition {
   name: string;
-  port_type: 'video' | 'audio' | 'image' | 'subtitle' | 'any_media' | 'search_results' | 'url_value';
+  port_type: 'video' | 'audio' | 'image' | 'subtitle' | 'any_media' | 'search_results' | 'url_value' | 'asset_value';
   required: boolean;
   description: string;
 }

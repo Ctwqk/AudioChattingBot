@@ -12,6 +12,7 @@ class PortType(str, Enum):
     ANY_MEDIA = "any_media"
     SEARCH_RESULTS = "search_results"
     URL_VALUE = "url_value"
+    ASSET_VALUE = "asset_value"
 
 
 @dataclass

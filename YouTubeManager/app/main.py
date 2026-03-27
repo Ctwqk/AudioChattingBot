@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +49,7 @@ QUOTA_USAGE_FILE = os.path.join(CREDENTIALS_DIR, "quota_usage.json")
 executor = ThreadPoolExecutor(max_workers=4)
 tasks: dict = {}  # task_id -> task dict
 auth_sessions: dict[str, dict[str, str | float]] = {}
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # FastAPI app setup
@@ -185,24 +188,65 @@ def is_allowed_return_to(url: str) -> bool:
 # ---------------------------------------------------------------------------
 # yt-dlp helpers
 # ---------------------------------------------------------------------------
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def _looks_like_youtube_video_id(video_id: str) -> bool:
+    return bool(YOUTUBE_VIDEO_ID_RE.fullmatch(video_id))
+
+
+def _is_downloadable_video(ydl: "yt_dlp.YoutubeDL", url: str) -> bool:
+    try:
+        info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        logger.info("Skipping undownloadable YouTube search result %s: %s", url, exc)
+        return False
+
+    if not isinstance(info, dict):
+        return False
+
+    if info.get("_type") in {"playlist", "channel", "multi_video"}:
+        return False
+
+    return _looks_like_youtube_video_id(str(info.get("id") or ""))
+
+
 def search_youtube(query: str, max_results: int = 10) -> list:
-    ydl_opts = {
+    search_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        result = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
-        entries = result.get("entries", [])
-        videos = []
+    verify_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+    }
+    search_count = max(max_results * 3, max_results)
+
+    with yt_dlp.YoutubeDL(search_opts) as ydl:
+        result = ydl.extract_info(f"ytsearch{search_count}:{query}", download=False)
+    entries = result.get("entries", [])
+
+    videos = []
+    with yt_dlp.YoutubeDL(verify_opts) as verifier:
         for entry in entries:
+            video_id = str(entry.get("id") or "").strip()
+            if not _looks_like_youtube_video_id(video_id):
+                continue
+
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            if not _is_downloadable_video(verifier, video_url):
+                continue
+
             thumbnails = entry.get("thumbnails") or []
             thumbnail = thumbnails[-1].get("url") if thumbnails else None
             videos.append(
                 {
-                    "id": entry.get("id"),
+                    "id": video_id,
                     "title": entry.get("title"),
-                    "url": f"https://www.youtube.com/watch?v={entry.get('id')}",
+                    "url": video_url,
                     "thumbnail": thumbnail,
                     "duration": entry.get("duration"),
                     "channel": entry.get("channel") or entry.get("uploader"),
@@ -210,7 +254,9 @@ def search_youtube(query: str, max_results: int = 10) -> list:
                     "upload_date": entry.get("upload_date"),
                 }
             )
-        return videos
+            if len(videos) >= max_results:
+                break
+    return videos
 
 
 def download_video(url: str, task_id: str, format_str: str = "best") -> None:

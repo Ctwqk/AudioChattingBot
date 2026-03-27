@@ -9,7 +9,7 @@ import BatchExecuteModal, { buildBatchExample, parseBatchItems } from '../batch/
 import { buildPlannerBatchItems, hasPlannerNodes } from '../../utils/plannerBatch';
 
 export default function EditorToolbar() {
-  const { nodes, edges, pipelineId, pipelineName, isDirty, setPipeline, setPipelineName } = useEditorStore();
+  const { nodes, edges, pipelineId, pipelineName, isDirty, setPipeline, setPipelineName, clear } = useEditorStore();
   const { nodeTypes } = useNodeTypes();
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
@@ -174,6 +174,23 @@ export default function EditorToolbar() {
     }
   };
 
+  const handleClearWorkspace = () => {
+    if (nodes.length === 0 && edges.length === 0 && !pipelineId && pipelineName === 'Untitled Pipeline') {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Clear the current workspace? This will reset the editor canvas and unsaved draft changes, but it will not delete any saved pipeline from the server.',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    clear();
+    setMessage({ type: 'success', text: 'Workspace cleared' });
+    navigate('/editor', { replace: true });
+  };
+
   const openBatchDialog = async () => {
     const targetPipelineId = isDirty || !pipelineId
       ? await ensureSaved()
@@ -280,6 +297,14 @@ export default function EditorToolbar() {
         <button onClick={handleSaveAsTemplate} disabled={savingTemplate}
           style={btnStyle('#7c3aed')}>
           {savingTemplate ? '...' : 'Save as Template'}
+        </button>
+        <button
+          onClick={handleClearWorkspace}
+          disabled={saving || validating || submitting || submittingBatch || savingTemplate}
+          style={btnStyle('#7f1d1d')}
+          title="Clear the current editor workspace without deleting saved pipelines"
+        >
+          Clear Workspace
         </button>
         <button
           onClick={openBatchDialog}

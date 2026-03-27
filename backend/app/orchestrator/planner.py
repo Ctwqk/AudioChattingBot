@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from app.schemas.pipeline import PipelineDefinition
 
-PLANNER_NODE_TYPES = {"youtube_search", "zip_records"}
+PLANNER_NODE_TYPES = {"youtube_search", "material_search", "zip_records"}
 SEARCH_RESULTS_HANDLE = "results"
 ZIP_INPUT_PREFIX = "input_"
 ZIP_OUTPUT_PREFIX = "output_"
 URL_INPUT_HANDLE = "url_input"
+ASSET_INPUT_HANDLE = "asset_input"
 
 
 def is_planner_node_type(type_name: str) -> bool:

@@ -18,6 +18,7 @@ const PORT_COLORS: Record<string, string> = {
   any_media: '#6b7280',
   search_results: '#f97316',
   url_value: '#14b8a6',
+  asset_value: '#e879f9',
 };
 
 const TOP_INPUT_PORTS = new Set([
@@ -29,7 +30,10 @@ const TOP_INPUT_PORTS = new Set([
 
 function shouldRenderInputOnTop(nodeType: string, portName: string) {
   if (nodeType === 'subtitle_to_speech') {
-    return portName === 'reference_audio';
+    return portName === 'reference_audio' || portName === 'ref_text';
+  }
+  if (nodeType === 'concat_vertical_timeline') {
+    return portName === 'image_top' || portName === 'image_bottom';
   }
   return TOP_INPUT_PORTS.has(portName);
 }

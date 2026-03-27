@@ -2,7 +2,7 @@ import { useState, useEffect, type CSSProperties } from 'react';
 import useEditorStore from '../../store/editorStore';
 import useNodeTypes from '../../hooks/useNodeTypes';
 import apiClient from '../../api/client';
-import type { Asset, ParamDefinition, PipelineDefinition } from '../../api/types';
+import type { Asset, MaterialLibrary, ParamDefinition, PipelineDefinition } from '../../api/types';
 import type { PlannerSearchResult } from '../../utils/plannerBatch';
 import { getZipConnectionSummary } from '../../utils/plannerBatch';
 
@@ -20,6 +20,7 @@ export default function ConfigPanel() {
   const { nodes, edges, selectedNodeId, updateNodeConfig, updateNodeLabel, removeNode } = useEditorStore();
   const { nodeTypes } = useNodeTypes();
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [materialLibraries, setMaterialLibraries] = useState<MaterialLibrary[]>([]);
   const [minimaxModels, setMinimaxModels] = useState<string[]>([]);
   const [minimaxBlankLabel, setMinimaxBlankLabel] = useState('Select MiniMax model');
   const [minimaxLoading, setMinimaxLoading] = useState(false);
@@ -36,6 +37,7 @@ export default function ConfigPanel() {
 
   useEffect(() => {
     apiClient.get('/assets?limit=500').then(res => setAssets(res.data.items || [])).catch(() => {});
+    apiClient.get('/material-libraries?limit=200').then(res => setMaterialLibraries(res.data.items || [])).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -86,11 +88,17 @@ export default function ConfigPanel() {
     setChannelFilter('');
     setDurationFilter('any');
 
-    if (node?.data.nodeType === 'youtube_search') {
+    if (node?.data.nodeType === 'youtube_search' || node?.data.nodeType === 'material_search') {
       const nodeConfig = (node.data.config as Record<string, unknown> | undefined) || {};
       setSearchQuery(String(nodeConfig.query || ''));
       setSearchResults(Array.isArray(nodeConfig.search_results) ? nodeConfig.search_results as YouTubeSearchResult[] : []);
-      setSelectedVideoIds(Array.isArray(nodeConfig.selected_video_ids) ? nodeConfig.selected_video_ids.map(String) : []);
+      setSelectedVideoIds(
+        Array.isArray(nodeConfig.selected_video_ids)
+          ? nodeConfig.selected_video_ids.map(String)
+          : Array.isArray(nodeConfig.selected_result_ids)
+            ? nodeConfig.selected_result_ids.map(String)
+            : []
+      );
       return;
     }
 
@@ -176,6 +184,64 @@ export default function ConfigPanel() {
     }
   };
 
+  const handleMaterialSearch = async () => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchError('Enter a material search query first');
+      setSearchResults([]);
+      return;
+    }
+
+    const sourceLibraryIds = Array.isArray(config.source_library_ids) ? config.source_library_ids.map(String) : [];
+    const resultLibraryIds = Array.isArray(config.result_library_ids) ? config.result_library_ids.map(String) : [];
+    if (sourceLibraryIds.length === 0) {
+      setSearchError('Select at least one source library');
+      setSearchResults([]);
+      return;
+    }
+
+    try {
+      setSearchLoading(true);
+      setSearchError(null);
+      const response = await fetch('/api/v1/material-search/materialize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query,
+          source_library_ids: sourceLibraryIds,
+          result_library_ids: resultLibraryIds,
+          top_k: Number(config.top_k || 50),
+          merge_gap: Number(config.merge_gap || 5),
+          expand_left: Number(config.expand_left || 4),
+          expand_right: Number(config.expand_right || 4),
+          rerank_top_m: Number(config.rerank_top_m || 8),
+          min_duration: Number(config.min_duration || 1.5),
+          max_duration: Number(config.max_duration || 20),
+          dedupe_overlap_threshold: Number(config.dedupe_overlap_threshold || 0.6),
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.detail || `Material search failed with status ${response.status}`);
+      }
+      const payload = await response.json() as { results?: YouTubeSearchResult[] };
+      const nextResults = payload.results || [];
+      const nextSelectedIds = nextResults.map(result => result.id);
+      setSearchResults(nextResults);
+      setSelectedVideoIds(nextSelectedIds);
+      updateNodeConfig(node.id, {
+        query,
+        search_results: nextResults,
+        selected_result_ids: nextSelectedIds,
+      });
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : 'Material search failed');
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
   const filteredSearchResults = searchResults.filter(result => {
     const channel = result.channel?.toLowerCase() || '';
     const channelNeedle = channelFilter.trim().toLowerCase();
@@ -201,7 +267,7 @@ export default function ConfigPanel() {
       ? selectedVideoIds.filter(id => id !== videoId)
       : [...selectedVideoIds, videoId];
     setSelectedVideoIds(next);
-    updateNodeConfig(node.id, { selected_video_ids: next });
+    updateNodeConfig(node.id, node.data.nodeType === 'material_search' ? { selected_result_ids: next } : { selected_video_ids: next });
   };
 
   const selectVisibleVideos = () => {
@@ -212,7 +278,7 @@ export default function ConfigPanel() {
 
   const clearSelectedVideos = () => {
     setSelectedVideoIds([]);
-    updateNodeConfig(node.id, { selected_video_ids: [] });
+    updateNodeConfig(node.id, node.data.nodeType === 'material_search' ? { selected_result_ids: [] } : { selected_video_ids: [] });
   };
 
   return (
@@ -396,6 +462,160 @@ export default function ConfigPanel() {
         </div>
       )}
 
+      {node.data.nodeType === 'material_search' && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 700, marginBottom: 8 }}>
+            Material Search
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+            Search one or more material libraries, materialize refined clip assets, then select which results should feed batch records.
+          </div>
+          <input
+            value={searchQuery}
+            onChange={e => {
+              setSearchQuery(e.target.value);
+              handleChange('query', e.target.value);
+            }}
+            placeholder="Describe the clip you want"
+            style={{ ...inputStyle, marginBottom: 8 }}
+          />
+          <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
+            <div>
+              <div style={labelStyle}>Search libraries</div>
+              <div style={libraryListStyle}>
+                {materialLibraries.map(library => {
+                  const selected = Array.isArray(config.source_library_ids) && config.source_library_ids.map(String).includes(library.id);
+                  return (
+                    <label key={`source-lib-${library.id}`} style={libraryRowStyle}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={e => {
+                          const current = Array.isArray(config.source_library_ids) ? config.source_library_ids.map(String) : [];
+                          const next = e.target.checked
+                            ? [...new Set([...current, library.id])]
+                            : current.filter(id => id !== library.id);
+                          handleChange('source_library_ids', next);
+                        }}
+                      />
+                      <span>{library.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <div>
+              <div style={labelStyle}>Save refined clips to</div>
+              <div style={libraryListStyle}>
+                {materialLibraries.map(library => {
+                  const selected = Array.isArray(config.result_library_ids) && config.result_library_ids.map(String).includes(library.id);
+                  return (
+                    <label key={`result-lib-${library.id}`} style={libraryRowStyle}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={e => {
+                          const current = Array.isArray(config.result_library_ids) ? config.result_library_ids.map(String) : [];
+                          const next = e.target.checked
+                            ? [...new Set([...current, library.id])]
+                            : current.filter(id => id !== library.id);
+                          handleChange('result_library_ids', next);
+                        }}
+                      />
+                      <span>{library.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleMaterialSearch()}
+            disabled={searchLoading}
+            style={primaryButtonStyle}
+          >
+            {searchLoading ? 'Searching...' : 'Search Material Library'}
+          </button>
+          {searchError ? (
+            <div style={{ fontSize: 11, color: '#fca5a5', marginTop: 8 }}>{searchError}</div>
+          ) : null}
+          {searchResults.length > 0 ? (
+            <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+              <div style={{ fontSize: 11, color: '#64748b' }}>
+                Showing {searchResults.length} results · selected {selectedVideoIds.length}
+              </div>
+              {searchResults.map(result => (
+                <div
+                  key={result.id}
+                  style={{
+                    padding: 10,
+                    borderRadius: 6,
+                    border: '1px solid #334155',
+                    backgroundColor: '#0f172a',
+                    color: '#e2e8f0',
+                  }}
+                >
+                  <label style={{ display: 'grid', gridTemplateColumns: '20px 1fr', gap: 10, alignItems: 'start', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedVideoIds.includes(result.id)}
+                      onChange={() => toggleSelectedVideo(result.id)}
+                      style={{ marginTop: 4 }}
+                    />
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                        {result.title}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>
+                        {result.start_sec != null && result.end_sec != null ? `${Number(result.start_sec).toFixed(1)}s → ${Number(result.end_sec).toFixed(1)}s` : ''}
+                      </div>
+                      {result.subtitle_text ? (
+                        <div style={{ fontSize: 11, color: '#cbd5e1' }}>
+                          {String(result.subtitle_text).slice(0, 180)}
+                        </div>
+                      ) : null}
+                    </div>
+                  </label>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {node.data.nodeType === 'material_library_ingest' && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 700, marginBottom: 8 }}>
+            Material Library Target
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+            Select which material libraries this source video should be sliced and indexed into.
+          </div>
+          <div style={libraryListStyle}>
+            {materialLibraries.map(library => {
+              const selected = Array.isArray(config.target_library_ids) && config.target_library_ids.map(String).includes(library.id);
+              return (
+                <label key={`ingest-lib-${library.id}`} style={libraryRowStyle}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={e => {
+                      const current = Array.isArray(config.target_library_ids) ? config.target_library_ids.map(String) : [];
+                      const next = e.target.checked
+                        ? [...new Set([...current, library.id])]
+                        : current.filter(id => id !== library.id);
+                      handleChange('target_library_ids', next);
+                    }}
+                  />
+                  <span>{library.name}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {node.data.nodeType === 'zip_records' && (
         <div style={cardStyle}>
           <div style={{ fontSize: 11, color: '#c4b5fd', fontWeight: 700, marginBottom: 8 }}>
@@ -460,6 +680,8 @@ export default function ConfigPanel() {
       {typeDef.params
         .filter(p => p.name !== 'asset_id' && p.name !== 'media_type' && !(node.data.nodeType === 'subtitle_translate' && p.name === 'model'))
         .filter(p => !(node.data.nodeType === 'youtube_search' && p.name === 'query'))
+        .filter(p => !(node.data.nodeType === 'material_search' && ['query', 'source_library_ids', 'result_library_ids'].includes(p.name)))
+        .filter(p => !(node.data.nodeType === 'material_library_ingest' && p.name === 'target_library_ids'))
         .map(param => (
           <ParamField
             key={param.name}
@@ -710,4 +932,23 @@ const summaryCardStyle: CSSProperties = {
   borderRadius: 6,
   border: '1px solid #334155',
   backgroundColor: '#0f172a',
+};
+
+const libraryListStyle: CSSProperties = {
+  display: 'grid',
+  gap: 6,
+  maxHeight: 140,
+  overflowY: 'auto',
+  padding: 8,
+  borderRadius: 6,
+  border: '1px solid #334155',
+  backgroundColor: '#0f172a',
+};
+
+const libraryRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  fontSize: 12,
+  color: '#cbd5e1',
 };

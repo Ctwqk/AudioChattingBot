@@ -4,6 +4,7 @@ from worker.handlers.trim import TrimHandler
 from worker.handlers.concat_horizontal import ConcatHorizontalHandler
 from worker.handlers.concat_vertical import ConcatVerticalHandler
 from worker.handlers.concat_timeline import ConcatTimelineHandler
+from worker.handlers.concat_vertical_timeline import ConcatVerticalTimelineHandler
 from worker.handlers.watermark import WatermarkHandler
 from worker.handlers.subtitle import SubtitleHandler
 from worker.handlers.speech_to_subtitle import SpeechToSubtitleHandler
@@ -15,6 +16,7 @@ from worker.handlers.transcode import TranscodeHandler
 from worker.handlers.url_download import UrlDownloadHandler
 from worker.handlers.export import ExportHandler
 from worker.handlers.youtube_upload import YouTubeUploadHandler
+from worker.handlers.material_library_ingest import MaterialLibraryIngestHandler
 
 HANDLER_MAP: dict[str, type[BaseHandler]] = {
     "source": SourceHandler,
@@ -22,6 +24,7 @@ HANDLER_MAP: dict[str, type[BaseHandler]] = {
     "concat_horizontal": ConcatHorizontalHandler,
     "concat_vertical": ConcatVerticalHandler,
     "concat_timeline": ConcatTimelineHandler,
+    "concat_vertical_timeline": ConcatVerticalTimelineHandler,
     "watermark": WatermarkHandler,
     "subtitle": SubtitleHandler,
     "speech_to_subtitle": SpeechToSubtitleHandler,
@@ -31,6 +34,7 @@ HANDLER_MAP: dict[str, type[BaseHandler]] = {
     "replace_audio": ReplaceAudioHandler,
     "transcode": TranscodeHandler,
     "url_download": UrlDownloadHandler,
+    "material_library_ingest": MaterialLibraryIngestHandler,
     "export": ExportHandler,
     "youtube_upload": YouTubeUploadHandler,
 }
