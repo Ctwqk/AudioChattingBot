@@ -6,6 +6,7 @@ from app.orchestrator.planner import (
     URL_INPUT_HANDLE,
     get_zip_channel_count,
     is_planner_node_type,
+    is_search_node_type,
     is_zip_input_handle,
     is_zip_output_handle,
 )
@@ -33,6 +34,52 @@ def _infer_actual_output_port_type(node) -> PortType | None:
         return PortType.VIDEO
 
     return None
+
+
+def _build_graph(definition: PipelineDefinition) -> tuple[dict[str, int], dict[str, list[str]], list[ValidationError]]:
+    adjacency: dict[str, list[str]] = defaultdict(list)
+    in_degree: dict[str, int] = {n.id: 0 for n in definition.nodes}
+    nodes_by_id = {n.id: n for n in definition.nodes}
+    errors: list[ValidationError] = []
+
+    for edge in definition.edges:
+        if edge.source not in nodes_by_id:
+            errors.append(ValidationError(
+                type="invalid_edge",
+                edge_id=edge.id,
+                message=f"Edge source '{edge.source}' does not exist",
+            ))
+            continue
+        if edge.target not in nodes_by_id:
+            errors.append(ValidationError(
+                type="invalid_edge",
+                edge_id=edge.id,
+                message=f"Edge target '{edge.target}' does not exist",
+            ))
+            continue
+        adjacency[edge.source].append(edge.target)
+        in_degree[edge.target] = in_degree.get(edge.target, 0) + 1
+
+    return in_degree, adjacency, errors
+
+
+def _kahn_topological_order(
+    in_degree: dict[str, int],
+    adjacency: dict[str, list[str]],
+) -> list[str]:
+    queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
+    order: list[str] = []
+    remaining = dict(in_degree)
+
+    while queue:
+        node_id = queue.popleft()
+        order.append(node_id)
+        for downstream in adjacency.get(node_id, []):
+            remaining[downstream] -= 1
+            if remaining[downstream] == 0:
+                queue.append(downstream)
+
+    return order
 
 
 def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
@@ -70,40 +117,10 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
                 message=f"Unknown node type '{node.type}'",
             ))
 
-    # 2. Build adjacency structures
-    adjacency: dict[str, list[str]] = defaultdict(list)  # node -> downstream nodes
-    in_degree: dict[str, int] = {n.id: 0 for n in definition.nodes}
+    in_degree, adjacency, graph_errors = _build_graph(definition)
+    errors.extend(graph_errors)
 
-    for edge in definition.edges:
-        if edge.source not in nodes_by_id:
-            errors.append(ValidationError(
-                type="invalid_edge",
-                edge_id=edge.id,
-                message=f"Edge source '{edge.source}' does not exist",
-            ))
-            continue
-        if edge.target not in nodes_by_id:
-            errors.append(ValidationError(
-                type="invalid_edge",
-                edge_id=edge.id,
-                message=f"Edge target '{edge.target}' does not exist",
-            ))
-            continue
-        adjacency[edge.source].append(edge.target)
-        in_degree[edge.target] = in_degree.get(edge.target, 0) + 1
-
-    # 3. Cycle detection via Kahn's algorithm
-    queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
-    topo_order = []
-    temp_in_degree = dict(in_degree)
-
-    while queue:
-        node_id = queue.popleft()
-        topo_order.append(node_id)
-        for downstream in adjacency.get(node_id, []):
-            temp_in_degree[downstream] -= 1
-            if temp_in_degree[downstream] == 0:
-                queue.append(downstream)
+    topo_order = _kahn_topological_order(in_degree, adjacency)
 
     if len(topo_order) < len(nodes_by_id):
         cycle_nodes = [nid for nid in nodes_by_id if nid not in topo_order]
@@ -121,9 +138,9 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
         if not src_node or not tgt_node:
             continue
 
-        if src_node.type in {"youtube_search", "material_search"} or tgt_node.type == "zip_records" or src_node.type == "zip_records":
+        if is_search_node_type(src_node.type) or tgt_node.type == "zip_records" or src_node.type == "zip_records":
             planner_valid = False
-            if src_node.type in {"youtube_search", "material_search"} and tgt_node.type == "zip_records":
+            if is_search_node_type(src_node.type) and tgt_node.type == "zip_records":
                 channel_count = get_zip_channel_count(tgt_node.data.config)
                 planner_valid = (
                     edge.sourceHandle == SEARCH_RESULTS_HANDLE
@@ -364,25 +381,8 @@ def validate_pipeline(definition: PipelineDefinition) -> ValidationResult:
 
 def topological_sort(definition: PipelineDefinition) -> list[str]:
     """Return topologically sorted list of node IDs."""
-    in_degree: dict[str, int] = {n.id: 0 for n in definition.nodes}
-    adjacency: dict[str, list[str]] = defaultdict(list)
-
-    for edge in definition.edges:
-        adjacency[edge.source].append(edge.target)
-        in_degree[edge.target] = in_degree.get(edge.target, 0) + 1
-
-    queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
-    result = []
-
-    while queue:
-        node_id = queue.popleft()
-        result.append(node_id)
-        for downstream in adjacency.get(node_id, []):
-            in_degree[downstream] -= 1
-            if in_degree[downstream] == 0:
-                queue.append(downstream)
-
-    return result
+    in_degree, adjacency, _ = _build_graph(definition)
+    return _kahn_topological_order(in_degree, adjacency)
 
 
 def build_dependency_map(definition: PipelineDefinition) -> dict[str, list[str]]:

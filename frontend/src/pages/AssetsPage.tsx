@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import apiClient from '../api/client';
 import type { Asset } from '../api/types';
+import { formatFileSize } from '../utils/fileSize';
 
 export default function AssetsPage() {
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -45,13 +46,6 @@ export default function AssetsPage() {
 
   const handleDownload = (id: string) => {
     window.open(`/api/v1/assets/${id}/download`, '_blank');
-  };
-
-  const formatSize = (bytes: number | null) => {
-    if (!bytes) return '-';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   return (
@@ -108,7 +102,7 @@ export default function AssetsPage() {
               <tr key={asset.id} style={{ borderBottom: '1px solid #1e293b' }}>
                 <td style={{ padding: '8px 12px' }}>{asset.original_name}</td>
                 <td style={{ padding: '8px 12px', color: '#94a3b8' }}>{asset.mime_type || '-'}</td>
-                <td style={{ padding: '8px 12px', color: '#94a3b8' }}>{formatSize(asset.file_size)}</td>
+                <td style={{ padding: '8px 12px', color: '#94a3b8' }}>{formatFileSize(asset.file_size)}</td>
                 <td style={{ padding: '8px 12px', color: '#94a3b8' }}>
                   {new Date(asset.uploaded_at).toLocaleString()}
                 </td>

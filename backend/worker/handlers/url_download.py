@@ -2,9 +2,12 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+import httpx
 
 from app.config import settings
 from app.storage.manager import get_storage
@@ -19,19 +22,35 @@ class UrlDownloadHandler(BaseHandler):
         if not url:
             raise ValueError("No URL provided")
 
+        normalized_url = self._normalize_url(url)
         fmt = node_config.get("format", "best")
-        cache_path = self._cache_storage_path(url, fmt, output_path)
+        cache_path = self._cache_storage_path(normalized_url, fmt, output_path)
         if await self._restore_from_cache(cache_path, output_path):
-            logger.info("URL download cache hit for %s (%s)", url, fmt)
+            logger.info("URL download cache hit for %s (%s)", normalized_url, fmt)
             return {
                 "_storage_path": cache_path,
                 "_skip_upload": True,
                 "cache_hit": True,
-                "source_url": self._normalize_url(url),
+                "source_url": normalized_url,
             }
 
-        logger.info("URL download cache miss for %s (%s)", url, fmt)
+        logger.info("URL download cache miss for %s (%s)", normalized_url, fmt)
 
+        platform = self._detect_platform(normalized_url)
+        if platform in {"xiaohongshu", "bilibili"}:
+            await self._download_via_platform_manager(platform, normalized_url, fmt, output_path)
+        else:
+            await self._download_via_ytdlp(normalized_url, fmt, output_path)
+
+        await self._save_to_cache(cache_path, output_path)
+        return {
+            "_storage_path": cache_path,
+            "_skip_upload": True,
+            "cache_hit": False,
+            "source_url": normalized_url,
+        }
+
+    async def _download_via_ytdlp(self, normalized_url: str, fmt: str, output_path: str) -> None:
         yt_dlp = self.resolve_executable("yt-dlp")
 
         args = [
@@ -50,7 +69,7 @@ class UrlDownloadHandler(BaseHandler):
         if fmt in format_map:
             args.extend(["-f", format_map[fmt]])
 
-        args.append(url)
+        args.append(normalized_url)
 
         if self._cancelled:
             raise CancelledError("Cancelled before download")
@@ -67,20 +86,64 @@ class UrlDownloadHandler(BaseHandler):
             raise CancelledError("Cancelled during download")
         if self._proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace")
-            raise RuntimeError(self._format_download_error(self._normalize_url(url), self._proc.returncode, stderr_text))
+            raise RuntimeError(self._format_download_error(normalized_url, self._proc.returncode, stderr_text))
 
-        await self._save_to_cache(cache_path, output_path)
-        return {
-            "_storage_path": cache_path,
-            "_skip_upload": True,
-            "cache_hit": False,
-            "source_url": self._normalize_url(url),
-        }
+    async def _download_via_platform_manager(self, platform: str, normalized_url: str, fmt: str, output_path: str) -> None:
+        base_url = settings.platform_browser_manager_url.rstrip("/")
+        request_url = f"{base_url}/api/platforms/{platform}/download"
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+            try:
+                response = await client.post(request_url, json={"url": normalized_url, "format": fmt})
+            except httpx.HTTPError as exc:
+                raise RuntimeError(self._format_platform_error(
+                    platform,
+                    normalized_url,
+                    "platform_unavailable",
+                    f"could not reach platform browser manager: {exc}",
+                )) from exc
+
+            if response.status_code >= 400:
+                raise RuntimeError(self._format_platform_service_failure(platform, normalized_url, response))
+
+            payload = response.json()
+            download_id = str(payload.get("download_id") or "").strip()
+            if not download_id:
+                raise RuntimeError(self._format_platform_error(
+                    platform,
+                    normalized_url,
+                    "platform_download_failed",
+                    "missing download_id in platform response",
+                ))
+
+            download_url = f"{base_url}/api/platforms/{platform}/downloads/{download_id}"
+            try:
+                async with client.stream("GET", download_url) as download_response:
+                    if download_response.status_code >= 400:
+                        detail = await self._extract_error_detail(download_response)
+                        raise RuntimeError(self._format_platform_error(
+                            platform,
+                            normalized_url,
+                            "platform_download_failed",
+                            detail,
+                        ))
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                    with open(output_path, "wb") as output_file:
+                        async for chunk in download_response.aiter_bytes():
+                            if self._cancelled:
+                                raise CancelledError("Cancelled during platform download")
+                            output_file.write(chunk)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(self._format_platform_error(
+                    platform,
+                    normalized_url,
+                    "platform_download_failed",
+                    f"failed to fetch downloaded media: {exc}",
+                )) from exc
 
     @staticmethod
     def _cache_storage_path(url: str, fmt: str, output_path: str) -> str:
-        normalized = UrlDownloadHandler._normalize_url(url)
-        cache_key = hashlib.sha256(f"{normalized}\n{fmt}".encode("utf-8")).hexdigest()
+        cache_key = hashlib.sha256(f"{url}\n{fmt}".encode("utf-8")).hexdigest()
         suffix = Path(output_path).suffix or ".mp4"
         return f"download-cache/{cache_key}{suffix}"
 
@@ -99,6 +162,14 @@ class UrlDownloadHandler(BaseHandler):
             video_id = query.get("v", "").strip()
             if video_id:
                 return f"https://www.youtube.com/watch?v={video_id}"
+
+        bilibili_id = UrlDownloadHandler._extract_bilibili_bvid(url)
+        if bilibili_id:
+            return f"https://www.bilibili.com/video/{bilibili_id}"
+
+        xiaohongshu_note_id = UrlDownloadHandler._extract_xiaohongshu_note_id(url)
+        if xiaohongshu_note_id:
+            return f"https://www.xiaohongshu.com/explore/{xiaohongshu_note_id}"
 
         normalized_query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
         cleaned = parsed._replace(
@@ -133,11 +204,85 @@ class UrlDownloadHandler(BaseHandler):
             await storage.save(cache_path, f)
 
     @staticmethod
+    def _detect_platform(url: str) -> str | None:
+        host = urlparse(url).netloc.lower()
+        if any(domain in host for domain in ("xiaohongshu.com", "xhslink.com")):
+            return "xiaohongshu"
+        if any(domain in host for domain in ("bilibili.com", "b23.tv")):
+            return "bilibili"
+        if any(domain in host for domain in ("youtube.com", "youtu.be")):
+            return "youtube"
+        return None
+
+    @staticmethod
+    def _extract_bilibili_bvid(url: str) -> str | None:
+        match = re.search(r"(BV[0-9A-Za-z]+)", url)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_xiaohongshu_note_id(url: str) -> str | None:
+        match = re.search(r"([0-9a-f]{24})", url, flags=re.IGNORECASE)
+        return match.group(1) if match else None
+
+    @staticmethod
+    async def _extract_error_detail(response: httpx.Response) -> str:
+        try:
+            payload = await response.aread()
+        except httpx.HTTPError:
+            return f"status {response.status_code}"
+        text = payload.decode("utf-8", errors="replace")
+        try:
+            data = response.json()
+        except ValueError:
+            return text or f"status {response.status_code}"
+        if isinstance(data, dict):
+            detail = data.get("detail")
+            if detail:
+                return str(detail)
+        return text or f"status {response.status_code}"
+
+    @classmethod
+    def _format_platform_service_failure(cls, platform: str, url: str, response: httpx.Response) -> str:
+        detail = response.text
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("detail"):
+            detail = str(payload["detail"])
+
+        lowered = detail.lower()
+        if response.status_code == 401 or "login_required" in lowered:
+            category = "login_required"
+        elif response.status_code == 503 or "platform_unavailable" in lowered:
+            category = "platform_unavailable"
+        elif response.status_code in {400, 404}:
+            category = "unsupported_url"
+        else:
+            category = "platform_download_failed"
+        return cls._format_platform_error(platform, url, category, detail)
+
+    @staticmethod
+    def _format_platform_error(platform: str, url: str, category: str, detail: str) -> str:
+        platform_label = {
+            "xiaohongshu": "Xiaohongshu",
+            "bilibili": "Bilibili",
+        }.get(platform, platform)
+        trimmed = detail.strip() or "(no detail provided)"
+        return (
+            f"URL Download failed: {platform_label} download error.\n"
+            f"URL: {url}\n"
+            f"Category: {category}\n"
+            f"Details:\n{trimmed}"
+        )
+
+    @staticmethod
     def _format_download_error(url: str, exit_code: int, stderr_text: str) -> str:
         lowered = stderr_text.lower()
+        normalized = lowered.replace("’", "'")
         details = UrlDownloadHandler._trim_error_details(stderr_text)
 
-        if "sign in to confirm you’re not a bot" in lowered or "sign in to confirm you're not a bot" in lowered:
+        if "sign in to confirm you're not a bot" in normalized:
             return (
                 "URL Download failed: YouTube is rate-limiting or bot-checking this request.\n"
                 f"URL: {url}\n"

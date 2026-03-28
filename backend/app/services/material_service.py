@@ -1,9 +1,5 @@
-from __future__ import annotations
-
 import asyncio
 import hashlib
-import json
-import math
 import os
 import re
 import tempfile
@@ -14,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -33,6 +30,10 @@ from app.storage.manager import get_storage
 DEFAULT_VECTOR_SIZE = 1024
 
 
+class MaterialLibraryConflictError(ValueError):
+    """Raised when attempting to create a duplicate material library."""
+
+
 @dataclass
 class CandidateWindow:
     source_asset_id: str
@@ -44,6 +45,7 @@ class CandidateWindow:
     neighbor_clip_ids: list[str]
     member_clip_ids: list[str]
     clips: list[dict[str, Any]]
+    lighthouse_score: float = 0.0
 
 
 def _tokenize(text: str) -> set[str]:
@@ -73,7 +75,11 @@ async def list_material_libraries(db: AsyncSession, skip: int = 0, limit: int = 
 async def create_material_library(db: AsyncSession, name: str, description: str = "") -> MaterialLibrary:
     library = MaterialLibrary(name=name.strip(), description=description.strip())
     db.add(library)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise MaterialLibraryConflictError(f"Material library '{library.name}' already exists") from exc
     await db.refresh(library)
     return library
 
@@ -139,6 +145,15 @@ async def _ensure_material_collection(vector_size: int) -> None:
     async with httpx.AsyncClient(timeout=60.0) as client:
         existing = await client.get(f"{base_url}/collections/{collection}")
         if existing.status_code == 200:
+            payload = existing.json().get("result") or {}
+            vectors = (((payload.get("config") or {}).get("params") or {}).get("vectors") or {})
+            if isinstance(vectors, dict):
+                for vector_name in ("content", "subtitle"):
+                    current_size = int(((vectors.get(vector_name) or {}).get("size") or 0) or 0)
+                    if current_size and current_size != vector_size:
+                        raise ValueError(
+                            f"Qdrant collection '{collection}' vector '{vector_name}' has size {current_size}, expected {vector_size}"
+                        )
             return
         response = await client.put(
             f"{base_url}/collections/{collection}",
@@ -165,6 +180,17 @@ async def _upsert_material_points(points: list[dict[str, Any]]) -> None:
         response.raise_for_status()
 
 
+async def _delete_material_points(point_ids: list[str]) -> None:
+    if not point_ids:
+        return
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            f"{settings.qdrant_url.rstrip('/')}/collections/{settings.material_qdrant_collection}/points/delete?wait=false",
+            json={"points": point_ids},
+        )
+        response.raise_for_status()
+
+
 async def ingest_material_asset(
     db: AsyncSession,
     *,
@@ -181,16 +207,15 @@ async def ingest_material_asset(
     if not asset:
         raise ValueError(f"Asset {asset_id} not found")
 
-    media_info = asset.media_info or {}
+    media_info = dict(asset.media_info or {})
     duration = float(media_info.get("duration") or 0.0)
+    media_info_updated = False
     if duration <= 0:
         fallback_media_info = fallback_media_info or {}
         duration = float(fallback_media_info.get("duration") or 0.0)
         if duration > 0:
-            merged_media_info = dict(media_info)
-            merged_media_info.update(fallback_media_info)
-            asset.media_info = merged_media_info
-            await db.flush()
+            media_info.update(fallback_media_info)
+            media_info_updated = True
 
     if duration <= 0:
         storage = get_storage(asset.storage_backend)
@@ -208,10 +233,8 @@ async def ingest_material_asset(
             probed_media_info = await _extract_media_info(local_path)
             duration = float((probed_media_info or {}).get("duration") or 0.0)
             if duration > 0:
-                merged_media_info = dict(media_info)
-                merged_media_info.update(probed_media_info or {})
-                asset.media_info = merged_media_info
-                await db.flush()
+                media_info.update(probed_media_info or {})
+                media_info_updated = True
         finally:
             if temp_path:
                 try:
@@ -221,6 +244,10 @@ async def ingest_material_asset(
 
     if duration <= 0:
         raise ValueError("Source asset is missing a valid duration")
+
+    if media_info_updated:
+        asset.media_info = media_info
+        await db.flush()
 
     windows: list[tuple[float, float]] = []
     cursor = 0.0
@@ -268,17 +295,41 @@ async def ingest_material_asset(
     subtitle_embeddings = await _embed_texts(subtitle_texts)
 
     points: list[dict[str, Any]] = []
+    stale_point_ids: list[str] = []
     for library_id in library_ids:
-        item = MaterialItem(
-            library_id=library_id,
-            asset_id=asset_id,
-            status="READY",
-            duration=duration,
-            subtitle_source=subtitle_mode,
-            metadata_json={"clip_len": clip_len, "stride": stride},
-        )
-        db.add(item)
-        await db.flush()
+        existing_item = (
+            await db.execute(
+                select(MaterialItem).where(
+                    MaterialItem.library_id == library_id,
+                    MaterialItem.asset_id == asset_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing_item:
+            existing_clips = (
+                await db.execute(
+                    select(MaterialClip.id).where(MaterialClip.parent_material_item_id == existing_item.id)
+                )
+            ).scalars().all()
+            stale_point_ids.extend(str(point_id) for point_id in existing_clips)
+            await db.execute(delete(MaterialClip).where(MaterialClip.parent_material_item_id == existing_item.id))
+            item = existing_item
+            item.status = "READY"
+            item.duration = duration
+            item.subtitle_source = subtitle_mode
+            item.metadata_json = {"clip_len": clip_len, "stride": stride}
+        else:
+            item = MaterialItem(
+                library_id=library_id,
+                asset_id=asset_id,
+                status="READY",
+                duration=duration,
+                subtitle_source=subtitle_mode,
+                metadata_json={"clip_len": clip_len, "stride": stride},
+            )
+            db.add(item)
+            await db.flush()
 
         for clip_index, payload in enumerate(clips_payload):
             clip = MaterialClip(
@@ -317,6 +368,7 @@ async def ingest_material_asset(
     await db.commit()
     qdrant_indexed = True
     try:
+        await _delete_material_points(stale_point_ids)
         await _upsert_material_points(points)
     except Exception:
         qdrant_indexed = False
@@ -403,7 +455,7 @@ def _merge_candidates(raw_results: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "start_sec": float(payload.get("start_sec") or 0.0),
                 "end_sec": float(payload.get("end_sec") or 0.0),
                 "subtitle_text": str(payload.get("subtitle_text") or ""),
-                "neighbor_clip_ids": list(payload.get("neighbor_clip_ids") or []),
+                "neighbor_clip_ids": payload.get("neighbor_clip_ids") or [],
                 "coarse_score": score,
             }
     return sorted(merged.values(), key=lambda item: item["coarse_score"], reverse=True)
@@ -444,7 +496,7 @@ def _candidate_window_from_cluster(cluster: list[dict[str, Any]]) -> CandidateWi
     member_clip_ids = [item["clip_id"] for item in cluster]
     neighbor_clip_ids: list[str] = []
     for item in cluster:
-        neighbor_clip_ids.extend(list(item.get("neighbor_clip_ids") or []))
+        neighbor_clip_ids.extend(item.get("neighbor_clip_ids") or [])
     return CandidateWindow(
         source_asset_id=cluster[0]["source_asset_id"],
         library_id=cluster[0]["library_id"],
@@ -455,6 +507,7 @@ def _candidate_window_from_cluster(cluster: list[dict[str, Any]]) -> CandidateWi
         neighbor_clip_ids=sorted(set(neighbor_clip_ids)),
         member_clip_ids=member_clip_ids,
         clips=cluster,
+        lighthouse_score=0.0,
     )
 
 
@@ -502,19 +555,19 @@ async def _lighthouse_rerank(query: str, windows: list[CandidateWindow], top_m: 
                 )
                 response.raise_for_status()
                 scores = response.json().get("scores") or []
-                keyed = []
-                for item, score in zip(windows, scores):
-                    item.clips[0]["_lighthouse_score"] = float(score)
-                    keyed.append(item)
-                return keyed[:top_m]
+                if len(scores) == len(windows):
+                    keyed = []
+                    for item, score in zip(windows, scores):
+                        item.lighthouse_score = float(score)
+                        keyed.append(item)
+                    keyed.sort(key=lambda item: item.lighthouse_score, reverse=True)
+                    return keyed[:top_m]
         except Exception:
             pass
 
-    ranked = sorted(
-        windows,
-        key=lambda item: (_overlap_score(query, item.subtitle_text) * 0.7) + (item.coarse_score * 0.3),
-        reverse=True,
-    )
+    for item in windows:
+        item.lighthouse_score = (_overlap_score(query, item.subtitle_text) * 0.7) + (item.coarse_score * 0.3)
+    ranked = sorted(windows, key=lambda item: item.lighthouse_score, reverse=True)
     return ranked[:top_m]
 
 
@@ -629,11 +682,10 @@ async def _cut_asset_clip(source_asset: Asset, start_sec: float, end_sec: float,
 
 async def preview_material_search(db: AsyncSession, request) -> tuple[MaterialQuery, list[dict[str, Any]]]:
     query_embedding = (await _embed_texts([request.query]))[0]
-    subtitle_embedding = query_embedding
 
     try:
         content_hits = await _qdrant_search("content", query_embedding, request.source_library_ids, request.top_k)
-        subtitle_hits = await _qdrant_search("subtitle", subtitle_embedding, request.source_library_ids, request.top_k)
+        subtitle_hits = await _qdrant_search("subtitle", query_embedding, request.source_library_ids, request.top_k)
     except Exception:
         content_hits = await _fallback_db_search(db, request.query, request.source_library_ids, request.top_k)
         subtitle_hits = []
@@ -668,7 +720,7 @@ async def preview_material_search(db: AsyncSession, request) -> tuple[MaterialQu
                 "end_sec": end_sec,
                 "subtitle_text": window.subtitle_text,
                 "coarse_score": window.coarse_score,
-                "lighthouse_score": (_overlap_score(request.query, window.subtitle_text) * 0.7) + (window.coarse_score * 0.3),
+                "lighthouse_score": window.lighthouse_score,
                 "confidence": confidence,
                 "member_clip_ids": window.member_clip_ids,
                 "neighbor_clip_ids": window.neighbor_clip_ids,
@@ -707,7 +759,7 @@ async def materialize_material_search(db: AsyncSession, request) -> tuple[Materi
         title_hint = f"material_{source_asset_id[:8]}_{int(item['start_sec'] * 1000)}_{int(item['end_sec'] * 1000)}"
         final_asset = await _cut_asset_clip(source_asset, item["start_sec"], item["end_sec"], title_hint, db)
 
-        clip = None
+        created_clips: list[MaterialClip] = []
         for library_id in result_libraries:
             clip = MaterialClip(
                 library_id=library_id,
@@ -729,41 +781,49 @@ async def materialize_material_search(db: AsyncSession, request) -> tuple[Materi
             )
             db.add(clip)
             await db.flush()
+            created_clips.append(clip)
 
-        query_result = MaterialQueryResult(
-            query_id=query_row.id,
-            source_asset_id=uuid.UUID(source_asset_id),
-            material_clip_id=clip.id if clip else None,
-            rank=rank,
-            coarse_score=item["coarse_score"],
-            lighthouse_score=item["lighthouse_score"],
-            confidence=item["confidence"],
-            start_sec=item["start_sec"],
-            end_sec=item["end_sec"],
-            metadata_json={
-                "member_clip_ids": item["member_clip_ids"],
-                "neighbor_clip_ids": item["neighbor_clip_ids"],
-                "storage_asset_id": str(final_asset.id),
-            },
-        )
-        db.add(query_result)
-        await db.flush()
-        final_results.append(
-            {
-                "id": str(query_result.id),
-                "title": source_asset.original_name,
-                "asset_id": str(final_asset.id),
-                "source_asset_id": source_asset_id,
-                "library_id": item["library_id"],
-                "start_sec": item["start_sec"],
-                "end_sec": item["end_sec"],
-                "subtitle_text": item["subtitle_text"],
-                "coarse_score": item["coarse_score"],
-                "lighthouse_score": item["lighthouse_score"],
-                "confidence": item["confidence"],
-                "metadata": {"storage_asset_id": str(final_asset.id)},
-            }
-        )
+        for clip in created_clips:
+            query_result = MaterialQueryResult(
+                query_id=query_row.id,
+                source_asset_id=uuid.UUID(source_asset_id),
+                material_clip_id=clip.id,
+                rank=rank,
+                coarse_score=item["coarse_score"],
+                lighthouse_score=item["lighthouse_score"],
+                confidence=item["confidence"],
+                start_sec=item["start_sec"],
+                end_sec=item["end_sec"],
+                metadata_json={
+                    "member_clip_ids": item["member_clip_ids"],
+                    "neighbor_clip_ids": item["neighbor_clip_ids"],
+                    "storage_asset_id": str(final_asset.id),
+                    "result_library_id": str(clip.library_id),
+                    "material_clip_id": str(clip.id),
+                },
+            )
+            db.add(query_result)
+            await db.flush()
+            final_results.append(
+                {
+                    "id": str(query_result.id),
+                    "title": source_asset.original_name,
+                    "asset_id": str(final_asset.id),
+                    "source_asset_id": source_asset_id,
+                    "library_id": str(clip.library_id),
+                    "start_sec": item["start_sec"],
+                    "end_sec": item["end_sec"],
+                    "subtitle_text": item["subtitle_text"],
+                    "coarse_score": item["coarse_score"],
+                    "lighthouse_score": item["lighthouse_score"],
+                    "confidence": item["confidence"],
+                    "metadata": {
+                        "storage_asset_id": str(final_asset.id),
+                        "material_clip_id": str(clip.id),
+                        "result_library_id": str(clip.library_id),
+                    },
+                }
+            )
 
     await db.commit()
     return query_row, final_results

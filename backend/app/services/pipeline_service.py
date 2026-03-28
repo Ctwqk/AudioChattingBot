@@ -71,13 +71,13 @@ async def delete_pipeline(db: AsyncSession, pipeline_id: uuid.UUID) -> bool:
     if not pipeline:
         return False
 
-    referencing_jobs = (
+    referencing_job = (
         await db.execute(
-            select(func.count()).select_from(Job).where(Job.pipeline_id == pipeline_id)
+            select(Job.id).where(Job.pipeline_id == pipeline_id).limit(1)
         )
-    ).scalar() or 0
+    ).scalar_one_or_none()
 
-    if referencing_jobs > 0:
+    if referencing_job is not None:
         if not pipeline.is_template:
             raise ValueError("Pipeline is referenced by existing jobs and cannot be deleted")
 
@@ -92,7 +92,7 @@ async def delete_pipeline(db: AsyncSession, pipeline_id: uuid.UUID) -> bool:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise ValueError("Pipeline is referenced by existing jobs and cannot be deleted")
+        raise ValueError("Pipeline could not be deleted because it was referenced while the delete was in progress")
     return True
 
 

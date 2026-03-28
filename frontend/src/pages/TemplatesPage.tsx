@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { isAxiosError } from 'axios';
 import apiClient from '../api/client';
 import type { Pipeline } from '../api/types';
-import BatchExecuteModal, { buildBatchExample, parseBatchItems } from '../components/batch/BatchExecuteModal';
-import { hasPlannerNodes } from '../utils/plannerBatch';
+import BatchExecuteModal, { parseBatchItems } from '../components/batch/BatchExecuteModal';
+import { buildBatchItems, hasPlannerNodes } from '../utils/plannerBatch';
 
 export default function TemplatesPage() {
   const [templates, setTemplates] = useState<Pipeline[]>([]);
@@ -41,7 +41,7 @@ export default function TemplatesPage() {
     setBatchInputError(null);
     try {
       setBatchTemplate(template);
-      setBatchInputText(JSON.stringify(buildBatchExample(template.definition), null, 2));
+      setBatchInputText(JSON.stringify(buildBatchItems(template.definition), null, 2));
     } catch (error) {
       const text = error instanceof Error ? error.message : 'Failed to build batch input';
       setMessage({ type: 'error', text });
@@ -78,7 +78,7 @@ export default function TemplatesPage() {
       closeBatchRun();
       navigate('/jobs');
     } catch (error) {
-      const detail = axios.isAxiosError(error)
+      const detail = isAxiosError(error)
         ? error.response?.data?.detail
         : null;
       setMessage({ type: 'error', text: detail || 'Batch run failed' });
@@ -96,7 +96,7 @@ export default function TemplatesPage() {
       await apiClient.delete(`/pipelines/${templateId}`);
       setTemplates(current => current.filter(tpl => tpl.id !== templateId));
     } catch (error) {
-      const detail = axios.isAxiosError(error)
+      const detail = isAxiosError(error)
         ? error.response?.data?.detail
         : null;
       alert(detail || 'Failed to delete template');

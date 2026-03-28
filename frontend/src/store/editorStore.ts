@@ -73,7 +73,15 @@ const useEditorStore = create<EditorState>()(persist((set, get) => ({
     set({
       nodes: get().nodes.map(n =>
         n.id === nodeId
-          ? { ...n, data: { ...n.data, config: { ...n.data.config as Record<string, unknown>, ...config } } }
+          ? (() => {
+              const nextConfig = { ...(n.data.config as Record<string, unknown>), ...config };
+              for (const [key, value] of Object.entries(config)) {
+                if (value === undefined) {
+                  delete nextConfig[key];
+                }
+              }
+              return { ...n, data: { ...n.data, config: nextConfig } };
+            })()
           : n
       ),
       isDirty: true,

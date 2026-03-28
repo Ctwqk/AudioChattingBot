@@ -1,12 +1,13 @@
 import { useState } from 'react';
+import { isAxiosError } from 'axios';
 import useEditorStore from '../../store/editorStore';
 import apiClient from '../../api/client';
 import { useNavigate } from 'react-router-dom';
 import type { PipelineDefinition } from '../../api/types';
 import useNodeTypes from '../../hooks/useNodeTypes';
-import { applyNodeDefaults } from '../../utils/nodeConfig';
-import BatchExecuteModal, { buildBatchExample, parseBatchItems } from '../batch/BatchExecuteModal';
-import { buildPlannerBatchItems, hasPlannerNodes } from '../../utils/plannerBatch';
+import BatchExecuteModal, { parseBatchItems } from '../batch/BatchExecuteModal';
+import { buildBatchItems, buildPlannerBatchItems, hasPlannerNodes } from '../../utils/plannerBatch';
+import { buildPipelineDefinition } from '../../utils/pipelineDefinition';
 
 export default function EditorToolbar() {
   const { nodes, edges, pipelineId, pipelineName, isDirty, setPipeline, setPipelineName, clear } = useEditorStore();
@@ -17,59 +18,49 @@ export default function EditorToolbar() {
   const [submittingBatch, setSubmittingBatch] = useState(false);
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [batchPipelineId, setBatchPipelineId] = useState<string | null>(null);
   const [batchInputText, setBatchInputText] = useState('');
   const [batchInputError, setBatchInputError] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const navigate = useNavigate();
 
   const getDefinition = (): PipelineDefinition => {
-    return {
-      nodes: nodes.map(n => {
-        const nodeTypeName = ((n.data.nodeType as string | undefined) || n.type || '');
-        const mergedConfig = applyNodeDefaults(
-          nodeTypeName,
-          nodeTypes,
-          (n.data.config as Record<string, unknown>) || {},
-        );
-        return {
-          id: n.id,
-          type: nodeTypeName,
-          position: n.position,
-          data: {
-            label: (n.data.label as string) || '',
-            config: mergedConfig,
-            asset_id: (mergedConfig.asset_id as string) || undefined,
-          },
-        };
-      }),
-      edges: edges.map(e => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        sourceHandle: e.sourceHandle || 'output',
-        targetHandle: e.targetHandle || 'input',
-      })),
-      viewport: { x: 0, y: 0, zoom: 1 },
+    return buildPipelineDefinition(nodes, edges, {
+      applyDefaults: true,
+      nodeTypes,
+    });
+  };
+
+  const persistPipeline = async (
+    definition: PipelineDefinition,
+    options?: { pipelineId?: string; isTemplate?: boolean },
+  ): Promise<string> => {
+    const targetPipelineId = options?.pipelineId ?? pipelineId;
+    const payload = {
+      name: pipelineName,
+      definition,
+      ...(options?.isTemplate ? { is_template: true } : {}),
     };
+
+    if (targetPipelineId) {
+      const res = await apiClient.put(`/pipelines/${targetPipelineId}`, payload);
+      setPipeline(res.data.id, res.data.name, nodes, edges);
+      return res.data.id as string;
+    }
+
+    const res = await apiClient.post('/pipelines', payload);
+    setPipeline(res.data.id, res.data.name, nodes, edges);
+    navigate(`/editor/${res.data.id}`, { replace: true });
+    return res.data.id as string;
   };
 
   const ensureSaved = async (): Promise<string | null> => {
     setSaving(true);
     setMessage(null);
     try {
-      const definition = getDefinition();
-      if (pipelineId) {
-        const res = await apiClient.put(`/pipelines/${pipelineId}`, { name: pipelineName, definition });
-        setPipeline(res.data.id, res.data.name, nodes, edges);
-        setMessage({ type: 'success', text: 'Saved' });
-        return res.data.id as string;
-      } else {
-        const res = await apiClient.post('/pipelines', { name: pipelineName, definition });
-        setPipeline(res.data.id, res.data.name, nodes, edges);
-        navigate(`/editor/${res.data.id}`, { replace: true });
-        setMessage({ type: 'success', text: 'Saved' });
-        return res.data.id as string;
-      }
+      const savedPipelineId = await persistPipeline(getDefinition());
+      setMessage({ type: 'success', text: 'Saved' });
+      return savedPipelineId;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Save failed';
       setMessage({ type: 'error', text: msg });
@@ -107,31 +98,17 @@ export default function EditorToolbar() {
     setMessage(null);
     try {
       const definition = getDefinition();
-      if (isDirty || !pipelineId) {
-        const savedPipelineId = await ensureSaved();
-        if (!savedPipelineId) {
+      let targetPipelineId = pipelineId;
+
+      if (isDirty || !targetPipelineId) {
+        targetPipelineId = await ensureSaved();
+        if (!targetPipelineId) {
           return;
         }
       }
 
-      const targetId = useEditorStore.getState().pipelineId;
-      if (targetId) {
-        await apiClient.put(`/pipelines/${targetId}`, {
-          name: pipelineName,
-          definition,
-          is_template: true,
-        });
-        setMessage({ type: 'success', text: 'Saved as template!' });
-      } else {
-        const res = await apiClient.post('/pipelines', {
-          name: pipelineName,
-          definition,
-          is_template: true,
-        });
-        setPipeline(res.data.id, res.data.name, nodes, edges);
-        navigate(`/editor/${res.data.id}`, { replace: true });
-        setMessage({ type: 'success', text: 'Saved as template!' });
-      }
+      await persistPipeline(definition, { pipelineId: targetPipelineId, isTemplate: true });
+      setMessage({ type: 'success', text: 'Saved as template!' });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Save as template failed';
       setMessage({ type: 'error', text: msg });
@@ -201,7 +178,8 @@ export default function EditorToolbar() {
 
     setBatchInputError(null);
     try {
-      setBatchInputText(JSON.stringify(buildBatchExample(getDefinition()), null, 2));
+      setBatchInputText(JSON.stringify(buildBatchItems(getDefinition()), null, 2));
+      setBatchPipelineId(targetPipelineId);
       setBatchOpen(true);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to prepare batch input';
@@ -214,8 +192,7 @@ export default function EditorToolbar() {
     setMessage(null);
 
     try {
-      const targetPipelineId = useEditorStore.getState().pipelineId;
-      if (!targetPipelineId) {
+      if (!batchPipelineId) {
         setMessage({ type: 'error', text: 'Save the pipeline first' });
         return;
       }
@@ -223,21 +200,22 @@ export default function EditorToolbar() {
       const inputs = parseBatchItems(batchInputText);
 
       const res = await apiClient.post('/jobs/batch', {
-        pipeline_id: targetPipelineId,
+        pipeline_id: batchPipelineId,
         inputs,
       });
 
       const count = Array.isArray(res.data) ? res.data.length : inputs.length;
       setBatchOpen(false);
+      setBatchPipelineId(null);
       setBatchInputError(null);
       setMessage({ type: 'success', text: `Submitted ${count} batch jobs` });
       navigate('/jobs');
     } catch (err: unknown) {
-      if (err instanceof Error && !('response' in (err as object))) {
+      if (err instanceof Error && !isAxiosError(err)) {
         setBatchInputError(err.message);
         return;
       }
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      const detail = isAxiosError(err) ? err.response?.data?.detail : undefined;
       setMessage({ type: 'error', text: detail || 'Batch submit failed' });
     } finally {
       setSubmittingBatch(false);
@@ -333,6 +311,7 @@ export default function EditorToolbar() {
           onClose={() => {
             if (submittingBatch) return;
             setBatchOpen(false);
+            setBatchPipelineId(null);
             setBatchInputError(null);
           }}
           onSubmit={() => void handleBatchSubmit()}

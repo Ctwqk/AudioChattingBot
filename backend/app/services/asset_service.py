@@ -33,7 +33,6 @@ async def _extract_media_info(local_path: str) -> dict | None:
         if proc.returncode != 0:
             return None
         raw = json.loads(stdout.decode())
-        # Extract useful summary
         fmt = raw.get("format", {})
         streams = raw.get("streams", [])
         video = next((s for s in streams if s.get("codec_type") == "video"), None)
@@ -73,7 +72,6 @@ async def upload_asset(db: AsyncSession, file: UploadFile) -> Asset:
     mime_type = file.content_type or mimetypes.guess_type(original_name)[0]
     file_size = await storage.save(storage_path, file.file)
 
-    # Extract media info via ffprobe
     media_info = None
     local_path = storage.get_local_path(storage_path)
     if local_path:
@@ -127,7 +125,6 @@ async def create_asset_from_local_file(
         uploaded_by=uploaded_by,
     )
     db.add(asset)
-    await db.flush()
     await db.commit()
     await db.refresh(asset)
     return asset

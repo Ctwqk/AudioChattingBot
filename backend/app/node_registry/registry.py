@@ -46,32 +46,7 @@ class NodeTypeRegistry:
         return src_port_def.port_type == tgt_port_def.port_type
 
     def _load_builtins(self) -> None:
-        from app.node_registry.builtin import (
-            source,
-            concat_horizontal,
-            concat_vertical,
-            concat_timeline,
-            concat_vertical_timeline,
-            trim,
-            watermark,
-            subtitle,
-            speech_to_subtitle,
-            subtitle_translate,
-            subtitle_to_speech,
-            bgm,
-            replace_audio,
-            transcode,
-            url_download,
-            material_library_ingest,
-            material_search,
-            youtube_search,
-            zip_records,
-            export,
-            youtube_upload,
-        )
-        for mod in [
-            source, concat_horizontal, concat_vertical, concat_timeline, concat_vertical_timeline,
-            trim, watermark, subtitle, speech_to_subtitle, subtitle_translate, subtitle_to_speech, bgm, replace_audio, transcode,
-            url_download, material_library_ingest, material_search, youtube_search, zip_records, export, youtube_upload,
-        ]:
+        from app.node_registry.builtin import BUILTIN_MODULES
+
+        for mod in BUILTIN_MODULES:
             self.register(mod.DEFINITION)

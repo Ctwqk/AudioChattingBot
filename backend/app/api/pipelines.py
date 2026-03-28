@@ -2,6 +2,7 @@ from __future__ import annotations
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.api.job_helpers import create_jobs_or_400
 from app.db import get_db
 from app.schemas.job import TemplateExecuteRequest, TemplateBatchExecuteRequest, JobDetailResponse
 from app.schemas.pipeline import (
@@ -139,13 +140,7 @@ async def execute_template_batch(
     if not pipeline or not pipeline.is_template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    jobs = []
-    for item in data.items:
-        try:
-            job = await create_job(db, pipeline_id, input_overrides=item)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        jobs.append(job)
+    jobs = await create_jobs_or_400(db, pipeline_id, data.items)
 
     await start_jobs_background(job.id for job in jobs)
     return [await to_job_detail_response(db, job) for job in jobs]

@@ -10,20 +10,18 @@ class SubtitleHandler(BaseHandler):
         outline_color = node_config.get("outline_color", "black")
         position = node_config.get("position", "bottom")
 
-        # Map position to ASS alignment
         alignment_map = {
-            "bottom": 2,    # bottom center
-            "top": 8,       # top center
-            "center": 5,    # middle center
+            "bottom": 2,
+            "top": 8,
+            "center": 5,
         }
         alignment = alignment_map.get(position, 2)
 
-        # Escape special characters in path for ffmpeg filter
         escaped_subtitle = subtitle_file.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
         style = (
             f"FontSize={font_size},"
-            f"PrimaryColour=&H00FFFFFF,"  # Will be overridden by force_style
+            f"PrimaryColour=&H00FFFFFF,"
             f"OutlineColour=&H00000000,"
             f"Alignment={alignment}"
         )

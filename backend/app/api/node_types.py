@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.node_registry.registry import NodeTypeRegistry
 from app.schemas.node_types import NodeTypeSchema, PortDefinitionSchema, ParamDefinitionSchema
 
@@ -50,6 +50,5 @@ async def get_node_type(type_name: str):
     registry = NodeTypeRegistry.get()
     defn = registry.get_type(type_name)
     if defn is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"Node type '{type_name}' not found")
     return _to_schema(defn)

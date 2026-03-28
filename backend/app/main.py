@@ -4,7 +4,22 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from app.api.artifacts import router as artifacts_router
+from app.api.assets import router as assets_router
+from app.api.jobs import router as jobs_router
+from app.api.llm import router as llm_router
+from app.api.materials import router as materials_router
+from app.api.node_types import router as node_types_router
+from app.api.pipelines import router as pipelines_router
 from app.config import settings
+from app.db import async_session
+from app.models.job import Job, JobStatus, NodeStatus
+from app.orchestrator.engine import engine
+from app.orchestrator.event_listener import event_listener
 
 logger = logging.getLogger(__name__)
 STALE_NODE_RECOVERY_THRESHOLD = timedelta(minutes=10)
@@ -20,7 +35,6 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
 
 async def _prepare_job_for_recovery(db, job) -> bool:
     """Reset clearly abandoned QUEUED/RUNNING nodes so startup recovery can redispatch them."""
-    from app.models.job import JobStatus, NodeStatus
 
     now = datetime.now(timezone.utc)
     changed = False
@@ -57,11 +71,6 @@ async def _prepare_job_for_recovery(db, job) -> bool:
 
 async def _recover_stale_jobs():
     """On startup, find PENDING/RUNNING jobs and restart them."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
-    from app.db import async_session
-    from app.models.job import Job, JobStatus
-    from app.orchestrator.engine import engine
 
     async with async_session() as db:
         stmt = (
@@ -87,16 +96,12 @@ async def _recover_stale_jobs():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: launch the orchestrator event listener
-    from app.orchestrator.event_listener import event_listener
     task = asyncio.create_task(event_listener())
     logger.info("Orchestrator event listener background task started")
 
-    # Recover jobs that were in-flight when the server last shut down
     await _recover_stale_jobs()
 
     yield
-    # Shutdown: cancel the event listener
     task.cancel()
     try:
         await task
@@ -120,24 +125,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    from app.api.node_types import router as node_types_router
     app.include_router(node_types_router)
-
-    from app.api.pipelines import router as pipelines_router
     app.include_router(pipelines_router)
-
-    from app.api.assets import router as assets_router
-    from app.api.artifacts import router as artifacts_router
     app.include_router(assets_router)
     app.include_router(artifacts_router)
-
-    from app.api.jobs import router as jobs_router
     app.include_router(jobs_router)
-
-    from app.api.llm import router as llm_router
     app.include_router(llm_router)
-
-    from app.api.materials import router as materials_router
     app.include_router(materials_router)
 
     @app.get("/health")

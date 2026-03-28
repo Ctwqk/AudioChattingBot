@@ -4,10 +4,47 @@ import useNodeTypes from '../../hooks/useNodeTypes';
 import apiClient from '../../api/client';
 import type { Asset, MaterialLibrary, ParamDefinition, PipelineDefinition } from '../../api/types';
 import type { PlannerSearchResult } from '../../utils/plannerBatch';
-import { getZipConnectionSummary } from '../../utils/plannerBatch';
+import { getSelectedPlannerResultIds, getZipConnectionSummary } from '../../utils/plannerBatch';
+import { formatFileSize } from '../../utils/fileSize';
+import { buildPipelineDefinition } from '../../utils/pipelineDefinition';
 
-type YouTubeSearchResult = PlannerSearchResult;
+type PlannerNodeSearchResult = PlannerSearchResult;
 type SourceMediaKind = 'video' | 'audio' | 'subtitle' | 'image';
+type RemoteSearchNodeType = 'youtube_search' | 'xiaohongshu_search' | 'bilibili_search';
+
+const REMOTE_SEARCH_NODE_CONFIG: Record<RemoteSearchNodeType, {
+  platform: 'youtube' | 'xiaohongshu' | 'bilibili';
+  label: string;
+  placeholder: string;
+  description: string;
+  buttonLabel: string;
+  endpoint: string;
+}> = {
+  youtube_search: {
+    platform: 'youtube',
+    label: 'YouTube',
+    placeholder: 'Search YouTube videos',
+    description: 'Search YouTube, then select which videos this channel should contribute to batch records.',
+    buttonLabel: 'Search YouTube',
+    endpoint: '/youtube/api/search',
+  },
+  xiaohongshu_search: {
+    platform: 'xiaohongshu',
+    label: 'Xiaohongshu',
+    placeholder: 'Search Xiaohongshu posts',
+    description: 'Search Xiaohongshu with the logged-in browser session, then select which posts should contribute to batch records.',
+    buttonLabel: 'Search Xiaohongshu',
+    endpoint: '/platforms/api/platforms/xiaohongshu/search',
+  },
+  bilibili_search: {
+    platform: 'bilibili',
+    label: 'Bilibili',
+    placeholder: 'Search Bilibili videos',
+    description: 'Search Bilibili with the logged-in browser session, then select which videos should contribute to batch records.',
+    buttonLabel: 'Search Bilibili',
+    endpoint: '/platforms/api/platforms/bilibili/search',
+  },
+};
 
 const SOURCE_MEDIA_OPTIONS: Array<{ value: SourceMediaKind; label: string }> = [
   { value: 'video', label: 'Video' },
@@ -25,7 +62,7 @@ export default function ConfigPanel() {
   const [minimaxBlankLabel, setMinimaxBlankLabel] = useState('Select MiniMax model');
   const [minimaxLoading, setMinimaxLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<YouTubeSearchResult[]>([]);
+  const [searchResults, setSearchResults] = useState<PlannerNodeSearchResult[]>([]);
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -88,17 +125,11 @@ export default function ConfigPanel() {
     setChannelFilter('');
     setDurationFilter('any');
 
-    if (node?.data.nodeType === 'youtube_search' || node?.data.nodeType === 'material_search') {
+    if (isRemoteSearchNodeType(node?.data.nodeType) || node?.data.nodeType === 'material_search') {
       const nodeConfig = (node.data.config as Record<string, unknown> | undefined) || {};
       setSearchQuery(String(nodeConfig.query || ''));
-      setSearchResults(Array.isArray(nodeConfig.search_results) ? nodeConfig.search_results as YouTubeSearchResult[] : []);
-      setSelectedVideoIds(
-        Array.isArray(nodeConfig.selected_video_ids)
-          ? nodeConfig.selected_video_ids.map(String)
-          : Array.isArray(nodeConfig.selected_result_ids)
-            ? nodeConfig.selected_result_ids.map(String)
-            : []
-      );
+      setSearchResults(Array.isArray(nodeConfig.search_results) ? nodeConfig.search_results as PlannerNodeSearchResult[] : []);
+      setSelectedVideoIds(getSelectedPlannerResultIds(nodeConfig));
       return;
     }
 
@@ -117,26 +148,7 @@ export default function ConfigPanel() {
   const sourceMediaType = normalizeSourceMediaType(config.media_type);
   const sourceAssets = assets.filter(asset => inferAssetKind(asset) === sourceMediaType);
   const selectedSourceAsset = sourceAssets.find(asset => asset.id === config.asset_id) ?? null;
-  const currentDefinition: PipelineDefinition = {
-    nodes: nodes.map(currentNode => ({
-      id: currentNode.id,
-      type: (currentNode.data.nodeType as string) || currentNode.type || '',
-      position: currentNode.position,
-      data: {
-        label: (currentNode.data.label as string) || '',
-        config: ((currentNode.data.config as Record<string, unknown>) || {}),
-        asset_id: (currentNode.data.asset_id as string | undefined),
-      },
-    })),
-    edges: edges.map(edge => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      sourceHandle: edge.sourceHandle || 'output',
-      targetHandle: edge.targetHandle || 'input',
-    })),
-    viewport: { x: 0, y: 0, zoom: 1 },
-  };
+  const currentDefinition: PipelineDefinition = buildPipelineDefinition(nodes, edges);
 
   const handleChange = (name: string, value: unknown) => {
     updateNodeConfig(node.id, { [name]: value });
@@ -150,12 +162,17 @@ export default function ConfigPanel() {
       return;
     }
 
+    if (!isRemoteSearchNodeType(node?.data.nodeType)) {
+      return;
+    }
+
     const maxResults = Number(config.max_results || 8);
+    const searchConfig = REMOTE_SEARCH_NODE_CONFIG[node.data.nodeType];
 
     try {
       setSearchLoading(true);
       setSearchError(null);
-      const response = await fetch('/youtube/api/search', {
+      const response = await fetch(searchConfig.endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, max_results: maxResults }),
@@ -164,8 +181,8 @@ export default function ConfigPanel() {
         const payload = await response.json().catch(() => null);
         throw new Error(payload?.detail || `Search failed with status ${response.status}`);
       }
-      const payload = await response.json() as { results?: YouTubeSearchResult[] };
-      const nextResults = payload.results || [];
+      const payload = await response.json() as { results?: PlannerNodeSearchResult[] };
+      const nextResults = ensurePlannerResultPlatform(payload.results || [], searchConfig.platform);
       const nextResultIds = new Set(nextResults.map(result => result.id));
       const preservedIds = selectedVideoIds.filter(id => nextResultIds.has(id));
       const nextSelectedIds = preservedIds.length > 0 ? preservedIds : nextResults.map(result => result.id);
@@ -174,10 +191,12 @@ export default function ConfigPanel() {
       updateNodeConfig(node.id, {
         query,
         search_results: nextResults,
-        selected_video_ids: nextSelectedIds,
+        selected_result_ids: nextSelectedIds,
+        selected_video_ids: undefined,
+        selected_material_result_ids: undefined,
       });
     } catch (error) {
-      setSearchError(error instanceof Error ? error.message : 'Search failed');
+      setSearchError(error instanceof Error ? error.message : `${searchConfig.label} search failed`);
       setSearchResults([]);
     } finally {
       setSearchLoading(false);
@@ -224,8 +243,8 @@ export default function ConfigPanel() {
         const payload = await response.json().catch(() => null);
         throw new Error(payload?.detail || `Material search failed with status ${response.status}`);
       }
-      const payload = await response.json() as { results?: YouTubeSearchResult[] };
-      const nextResults = payload.results || [];
+      const payload = await response.json() as { results?: PlannerNodeSearchResult[] };
+      const nextResults = ensurePlannerResultPlatform(payload.results || [], 'material');
       const nextSelectedIds = nextResults.map(result => result.id);
       setSearchResults(nextResults);
       setSelectedVideoIds(nextSelectedIds);
@@ -233,6 +252,8 @@ export default function ConfigPanel() {
         query,
         search_results: nextResults,
         selected_result_ids: nextSelectedIds,
+        selected_video_ids: undefined,
+        selected_material_result_ids: undefined,
       });
     } catch (error) {
       setSearchError(error instanceof Error ? error.message : 'Material search failed');
@@ -267,19 +288,35 @@ export default function ConfigPanel() {
       ? selectedVideoIds.filter(id => id !== videoId)
       : [...selectedVideoIds, videoId];
     setSelectedVideoIds(next);
-    updateNodeConfig(node.id, node.data.nodeType === 'material_search' ? { selected_result_ids: next } : { selected_video_ids: next });
+    updateNodeConfig(node.id, {
+      selected_result_ids: next,
+      selected_video_ids: undefined,
+      selected_material_result_ids: undefined,
+    });
   };
 
   const selectVisibleVideos = () => {
     const next = filteredSearchResults.map(result => result.id);
     setSelectedVideoIds(next);
-    updateNodeConfig(node.id, { selected_video_ids: next });
+    updateNodeConfig(node.id, {
+      selected_result_ids: next,
+      selected_video_ids: undefined,
+      selected_material_result_ids: undefined,
+    });
   };
 
   const clearSelectedVideos = () => {
     setSelectedVideoIds([]);
-    updateNodeConfig(node.id, node.data.nodeType === 'material_search' ? { selected_result_ids: [] } : { selected_video_ids: [] });
+    updateNodeConfig(node.id, {
+      selected_result_ids: [],
+      selected_video_ids: undefined,
+      selected_material_result_ids: undefined,
+    });
   };
+
+  const remoteSearchConfig = isRemoteSearchNodeType(node.data.nodeType)
+    ? REMOTE_SEARCH_NODE_CONFIG[node.data.nodeType]
+    : null;
 
   return (
     <div style={panelStyle}>
@@ -352,13 +389,13 @@ export default function ConfigPanel() {
         </div>
       )}
 
-      {node.data.nodeType === 'youtube_search' && (
+      {remoteSearchConfig && (
         <div style={cardStyle}>
           <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 700, marginBottom: 8 }}>
             Search and Select
           </div>
           <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
-            Search YouTube, then select which videos this channel should contribute to batch records.
+            {remoteSearchConfig.description}
           </div>
           <input
             value={searchQuery}
@@ -366,7 +403,7 @@ export default function ConfigPanel() {
               setSearchQuery(e.target.value);
               handleChange('query', e.target.value);
             }}
-            placeholder="Search YouTube videos"
+            placeholder={remoteSearchConfig.placeholder}
             style={{ ...inputStyle, marginBottom: 8 }}
           />
           <button
@@ -375,7 +412,7 @@ export default function ConfigPanel() {
             disabled={searchLoading}
             style={primaryButtonStyle}
           >
-            {searchLoading ? 'Searching...' : 'Search'}
+            {searchLoading ? 'Searching...' : remoteSearchConfig.buttonLabel}
           </button>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
             <button type="button" onClick={selectVisibleVideos} style={smallButtonStyle}>
@@ -679,7 +716,7 @@ export default function ConfigPanel() {
 
       {typeDef.params
         .filter(p => p.name !== 'asset_id' && p.name !== 'media_type' && !(node.data.nodeType === 'subtitle_translate' && p.name === 'model'))
-        .filter(p => !(node.data.nodeType === 'youtube_search' && p.name === 'query'))
+        .filter(p => !(isRemoteSearchNodeType(node.data.nodeType) && p.name === 'query'))
         .filter(p => !(node.data.nodeType === 'material_search' && ['query', 'source_library_ids', 'result_library_ids'].includes(p.name)))
         .filter(p => !(node.data.nodeType === 'material_library_ingest' && p.name === 'target_library_ids'))
         .map(param => (
@@ -721,6 +758,20 @@ function formatDuration(duration?: number | null) {
     .filter((value, index) => value > 0 || index > 0)
     .map(value => String(value).padStart(2, '0'));
   return parts.join(':');
+}
+
+function isRemoteSearchNodeType(value: unknown): value is RemoteSearchNodeType {
+  return value === 'youtube_search' || value === 'xiaohongshu_search' || value === 'bilibili_search';
+}
+
+function ensurePlannerResultPlatform(
+  results: PlannerNodeSearchResult[],
+  platform: NonNullable<PlannerNodeSearchResult['platform']>,
+): PlannerNodeSearchResult[] {
+  return results.map(result => ({
+    ...result,
+    platform: result.platform || platform,
+  }));
 }
 
 function normalizeSourceMediaType(value: unknown): SourceMediaKind {
@@ -779,13 +830,6 @@ function formatAssetOption(asset: Asset): string {
     meta.push(formatFileSize(size));
   }
   return meta.length > 0 ? `${asset.original_name} (${meta.join(' · ')})` : asset.original_name;
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function ParamField({

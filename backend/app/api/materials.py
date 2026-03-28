@@ -17,6 +17,7 @@ from app.schemas.material import (
     MaterialSearchResultResponse,
 )
 from app.services.material_service import (
+    MaterialLibraryConflictError,
     create_material_library,
     get_material_library,
     list_material_clips,
@@ -39,7 +40,10 @@ async def list_libraries(skip: int = 0, limit: int = 100, db: AsyncSession = Dep
 
 @router.post("/material-libraries", response_model=MaterialLibraryResponse)
 async def create_library(payload: MaterialLibraryCreate, db: AsyncSession = Depends(get_db)):
-    item = await create_material_library(db, payload.name, payload.description)
+    try:
+        item = await create_material_library(db, payload.name, payload.description)
+    except MaterialLibraryConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return MaterialLibraryResponse.model_validate(item)
 
 

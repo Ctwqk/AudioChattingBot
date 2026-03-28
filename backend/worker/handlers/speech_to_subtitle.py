@@ -16,7 +16,7 @@ class SpeechToSubtitleHandler(BaseHandler):
         model_name = str(node_config.get("model", "small") or "small")
         language = str(node_config.get("language", "") or "").strip() or None
         beam_size = int(node_config.get("beam_size", 5) or 5)
-        merge_adjacent = self._bool_param(node_config.get("merge_adjacent"), True)
+        merge_adjacent = self.parse_bool_param(node_config.get("merge_adjacent"), True)
         merge_max_gap_seconds = float(node_config.get("merge_max_gap_seconds", 0.6) or 0.6)
         merge_min_chars = int(node_config.get("merge_min_chars", 40) or 40)
         merge_min_duration_seconds = float(node_config.get("merge_min_duration_seconds", 2.2) or 2.2)
@@ -72,14 +72,6 @@ class SpeechToSubtitleHandler(BaseHandler):
             )
             result["asr_fallback"] = "cpu"
         return result
-
-    @staticmethod
-    def _bool_param(value, default: bool) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _should_fallback_to_cpu(device: str, exc: RuntimeError) -> bool:

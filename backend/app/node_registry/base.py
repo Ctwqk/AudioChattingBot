@@ -39,7 +39,7 @@ class ParamDefinition:
 class NodeTypeDefinition:
     type_name: str
     display_name: str
-    category: str  # "source", "combine", "transform", "audio", "output"
+    category: str
     description: str = ""
     icon: str = ""
     inputs: list[PortDefinition] = field(default_factory=list)

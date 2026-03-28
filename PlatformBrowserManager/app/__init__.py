@@ -1,0 +1,1 @@
+"""Platform browser manager package."""

@@ -50,7 +50,6 @@ DEFINITION = NodeTypeDefinition(
             name="store_neighbors",
             param_type="boolean",
             default=True,
-            required=False,
             description="Store neighboring clip ids for later expansion",
         ),
     ],

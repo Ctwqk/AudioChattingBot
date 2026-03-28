@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { useYouTubeAuth } from '../../hooks/useYouTubeAuth';
+import { usePlatformAuth } from '../../hooks/usePlatformAuth';
 
 const links = [
   { to: '/editor', label: 'Editor', icon: '⬡' },
@@ -16,8 +17,38 @@ export default function Sidebar({
   onToggle: () => void;
 }) {
   const { authStatus, authLoading, authError, authInitialized, openYouTubeAuth } = useYouTubeAuth();
+  const xiaohongshuAuth = usePlatformAuth('xiaohongshu');
+  const bilibiliAuth = usePlatformAuth('bilibili');
   const navWidth = collapsed ? 72 : 200;
   const checking = !authInitialized && !authStatus && !authError;
+
+  const xiaohongshuChecking = !xiaohongshuAuth.authInitialized && !xiaohongshuAuth.authStatus && !xiaohongshuAuth.authError;
+  const bilibiliChecking = !bilibiliAuth.authInitialized && !bilibiliAuth.authStatus && !bilibiliAuth.authError;
+
+  const platformItems = [
+    {
+      key: 'xiaohongshu',
+      shortLabel: 'XHS',
+      label: 'Xiaohongshu',
+      status: xiaohongshuAuth.authStatus,
+      loading: xiaohongshuAuth.authLoading,
+      error: xiaohongshuAuth.authError,
+      checking: xiaohongshuChecking,
+      openAuth: xiaohongshuAuth.openPlatformAuth,
+      logoutAuth: xiaohongshuAuth.logoutPlatformAuth,
+    },
+    {
+      key: 'bilibili',
+      shortLabel: 'BILI',
+      label: 'Bilibili',
+      status: bilibiliAuth.authStatus,
+      loading: bilibiliAuth.authLoading,
+      error: bilibiliAuth.authError,
+      checking: bilibiliChecking,
+      openAuth: bilibiliAuth.openPlatformAuth,
+      logoutAuth: bilibiliAuth.logoutPlatformAuth,
+    },
+  ];
 
   return (
     <nav style={{
@@ -108,6 +139,29 @@ export default function Sidebar({
             >
               YT
             </button>
+            {platformItems.map(item => (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => void item.openAuth()}
+                disabled={item.loading}
+                title={item.status?.authenticated ? `Re-login ${item.label}` : `Login ${item.label}`}
+                style={{
+                  width: '100%',
+                  border: 'none',
+                  borderRadius: 10,
+                  padding: '10px 0',
+                  backgroundColor: '#0f766e',
+                  color: '#fff',
+                  cursor: item.loading ? 'default' : 'pointer',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  opacity: item.loading ? 0.7 : 1,
+                }}
+              >
+                {item.shortLabel}
+              </button>
+            ))}
           </div>
         ) : (
           <>
@@ -140,9 +194,95 @@ export default function Sidebar({
                 {authError}
               </div>
             ) : null}
+
+            <div style={{ fontSize: 12, color: '#9aa4c7', marginTop: 16, marginBottom: 8 }}>
+              Platforms
+            </div>
+            <div style={{ display: 'grid', gap: 10 }}>
+              {platformItems.map(item => {
+                const unavailable = Boolean(item.error && !item.status);
+                const statusText = item.checking
+                  ? 'Checking...'
+                  : unavailable
+                    ? 'Unavailable'
+                    : item.status?.authenticated
+                      ? 'Connected'
+                      : 'Login required';
+                const statusColor = unavailable
+                  ? '#fca5a5'
+                  : item.status?.authenticated
+                    ? '#86efac'
+                    : '#fbbf24';
+                return (
+                  <div
+                    key={item.key}
+                    style={{
+                      padding: 10,
+                      borderRadius: 10,
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      backgroundColor: 'rgba(255,255,255,0.03)',
+                    }}
+                  >
+                    <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 6 }}>
+                      {item.label}
+                    </div>
+                    <div style={{ fontSize: 12, color: statusColor, marginBottom: 10 }}>
+                      {statusText}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => void item.openAuth()}
+                        disabled={item.loading}
+                        style={{
+                          flex: 1,
+                          border: 'none',
+                          borderRadius: 8,
+                          padding: '10px 12px',
+                          backgroundColor: '#0f766e',
+                          color: '#fff',
+                          cursor: item.loading ? 'default' : 'pointer',
+                          fontSize: 13,
+                          opacity: item.loading ? 0.7 : 1,
+                        }}
+                      >
+                        {item.status?.authenticated ? 'Re-login' : 'Login'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void item.logoutAuth()}
+                        disabled={item.loading}
+                        style={{
+                          border: '1px solid rgba(255,255,255,0.14)',
+                          borderRadius: 8,
+                          padding: '10px 12px',
+                          backgroundColor: 'transparent',
+                          color: '#cbd5e1',
+                          cursor: item.loading ? 'default' : 'pointer',
+                          fontSize: 13,
+                          opacity: item.loading ? 0.7 : 1,
+                        }}
+                      >
+                        Logout
+                      </button>
+                    </div>
+                    {item.error ? (
+                      <div style={{ marginTop: 8, fontSize: 11, color: '#fca5a5' }}>
+                        {item.error}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
           </>
         )}
         {collapsed && authError ? (
+          <div style={{ marginTop: 8, fontSize: 10, color: '#fca5a5', textAlign: 'center' }}>
+            !
+          </div>
+        ) : null}
+        {collapsed && platformItems.some(item => item.error) ? (
           <div style={{ marginTop: 8, fontSize: 10, color: '#fca5a5', textAlign: 'center' }}>
             !
           </div>

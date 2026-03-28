@@ -91,6 +91,7 @@ services:
       STORAGE_LOCAL_ROOT: /data/storage
       DATABASE_URL: postgresql+asyncpg://vp:${POSTGRES_PASSWORD:-vp_secret}@postgres:5432/videoprocess
       YOUTUBE_CREDENTIALS_DIR: /app/youtube_credentials
+      PLATFORM_BROWSER_MANAGER_URL: http://platform-browser-manager:8898
     volumes:
       - storage_data:/data/storage
       - ./YouTubeManager/credentials:/app/youtube_credentials
@@ -117,6 +118,24 @@ services:
     networks:
       - vp_internal
 
+  platform-browser-manager:
+    build:
+      context: ./PlatformBrowserManager
+      dockerfile: Dockerfile
+    container_name: vp_platform_browser_manager
+    environment:
+      OPENCLI_VERSION: "1.5.3"
+      DOWNLOAD_ROOT: /app/downloads
+      BROWSER_PROFILE_ROOT: /app/browser-profiles
+      DISPLAY: ${DISPLAY:-}
+    volumes:
+      - ./PlatformBrowserManager/downloads:/app/downloads
+      - ./PlatformBrowserManager/browser-profiles:/app/browser-profiles
+    ports:
+      - "8898:8898"
+    networks:
+      - vp_internal
+
   frontend:
     build:
       context: ./frontend
@@ -127,6 +146,7 @@ services:
     depends_on:
       - api
       - youtube-manager
+      - platform-browser-manager
     networks:
       - vp_internal
 

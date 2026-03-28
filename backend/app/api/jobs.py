@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
+from app.api.job_helpers import create_jobs_or_400
 from app.schemas.job import (
     JobCreate, BatchJobCreate, JobResponse, JobDetailResponse, JobListResponse,
 )
@@ -64,13 +65,7 @@ async def cancel(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 @router.post("/jobs/batch", response_model=list[JobDetailResponse], status_code=201)
 async def submit_batch(data: BatchJobCreate, db: AsyncSession = Depends(get_db)):
     """Submit multiple jobs for the same pipeline with different inputs."""
-    jobs = []
-    for input_overrides in data.inputs:
-        try:
-            job = await create_job(db, uuid.UUID(data.pipeline_id), input_overrides=input_overrides)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        jobs.append(job)
+    jobs = await create_jobs_or_400(db, uuid.UUID(data.pipeline_id), data.inputs)
 
     await start_jobs_background(job.id for job in jobs)
     return [await to_job_detail_response(db, job) for job in jobs]

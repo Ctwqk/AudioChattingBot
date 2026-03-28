@@ -2,12 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import apiClient from '../api/client';
 import type { Job } from '../api/types';
-
-const STATUS_COLORS: Record<string, string> = {
-  PENDING: '#6b7280', VALIDATING: '#6b7280', PLANNING: '#6b7280',
-  RUNNING: '#3b82f6', SUCCEEDED: '#22c55e', FAILED: '#ef4444',
-  CANCELLED: '#f59e0b', PARTIALLY_FAILED: '#f97316',
-};
+import { JOB_STATUS_COLORS } from '../utils/jobStatus';
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -76,7 +71,7 @@ export default function JobsPage() {
                 </td>
                 <td style={{ padding: '8px 12px' }}>
                   <span style={{
-                    color: STATUS_COLORS[job.status] || '#6b7280',
+                    color: JOB_STATUS_COLORS[job.status] || '#6b7280',
                     fontWeight: 600,
                   }}>
                     {job.status}

@@ -1,7 +1,9 @@
 import type { PipelineDefinition, PipelineNode } from '../api/types';
+import { getZipChannelCount } from './zipRecords';
 
 export type PlannerSearchResult = {
   id: string;
+  platform?: string | null;
   title: string;
   url?: string;
   asset_id?: string;
@@ -18,8 +20,7 @@ export type PlannerSearchResult = {
   confidence?: number | null;
 };
 
-const SEARCH_NODE_TYPE = 'youtube_search';
-const MATERIAL_SEARCH_NODE_TYPE = 'material_search';
+const SEARCH_NODE_TYPES = new Set(['youtube_search', 'xiaohongshu_search', 'bilibili_search', 'material_search']);
 const ZIP_NODE_TYPE = 'zip_records';
 const URL_DOWNLOAD_NODE_TYPE = 'url_download';
 const SOURCE_NODE_TYPE = 'source';
@@ -39,6 +40,7 @@ function asSearchResults(value: unknown): PlannerSearchResult[] {
     .filter(item => typeof item.id === 'string' && (typeof item.url === 'string' || typeof item.asset_id === 'string'))
     .map(item => ({
       id: String(item.id),
+      platform: typeof item.platform === 'string' ? item.platform : null,
       title: String(item.title || item.url || item.asset_id || item.id),
       url: typeof item.url === 'string' ? String(item.url) : undefined,
       asset_id: typeof item.asset_id === 'string' ? String(item.asset_id) : undefined,
@@ -60,11 +62,11 @@ function getConfig(node: PipelineNode): Record<string, unknown> {
   return asObject(node.data?.config);
 }
 
-function getChannelCount(node: PipelineNode): number {
-  const raw = getConfig(node).channel_count;
-  const value = typeof raw === 'number' ? raw : Number(raw || 2);
-  if (!Number.isFinite(value)) return 2;
-  return Math.max(1, Math.trunc(value));
+export function getSelectedPlannerResultIds(config: Record<string, unknown>): string[] {
+  if (Array.isArray(config.selected_result_ids)) {
+    return config.selected_result_ids.map(String);
+  }
+  return [];
 }
 
 function getRecordLimit(node: PipelineNode): number {
@@ -77,13 +79,7 @@ function getRecordLimit(node: PipelineNode): number {
 function getSelectedSearchResults(node: PipelineNode): PlannerSearchResult[] {
   const config = getConfig(node);
   const results = asSearchResults(config.search_results);
-  const selectedIds = Array.isArray(config.selected_video_ids)
-    ? config.selected_video_ids.map(String)
-    : Array.isArray(config.selected_result_ids)
-      ? config.selected_result_ids.map(String)
-      : Array.isArray(config.selected_material_result_ids)
-        ? config.selected_material_result_ids.map(String)
-        : [];
+  const selectedIds = getSelectedPlannerResultIds(config);
 
   if (selectedIds.length === 0) {
     return results;
@@ -121,7 +117,7 @@ function mergeItemSets(itemSets: Array<Array<Record<string, unknown>>>): Array<R
 }
 
 export function hasPlannerNodes(definition: PipelineDefinition): boolean {
-  return definition.nodes.some(node => node.type === SEARCH_NODE_TYPE || node.type === MATERIAL_SEARCH_NODE_TYPE || node.type === ZIP_NODE_TYPE);
+  return definition.nodes.some(node => SEARCH_NODE_TYPES.has(node.type) || node.type === ZIP_NODE_TYPE);
 }
 
 export function buildPlannerBatchItems(definition: PipelineDefinition): Array<Record<string, unknown>> {
@@ -133,7 +129,7 @@ export function buildPlannerBatchItems(definition: PipelineDefinition): Array<Re
   }
 
   const itemSets = zipNodes.map(zipNode => {
-    const channelCount = getChannelCount(zipNode);
+    const channelCount = getZipChannelCount(getConfig(zipNode));
     const recordLimit = getRecordLimit(zipNode);
     const channels: Array<PlannerSearchResult[]> = [];
     const downloadTargets: string[] = [];
@@ -147,13 +143,13 @@ export function buildPlannerBatchItems(definition: PipelineDefinition): Array<Re
         throw new Error(`${zipNode.data.label || 'Zip Records'} is missing ${inputHandle}.`);
       }
       const sourceNode = nodesById.get(inputEdge.source);
-      if (!sourceNode || (sourceNode.type !== SEARCH_NODE_TYPE && sourceNode.type !== MATERIAL_SEARCH_NODE_TYPE)) {
+      if (!sourceNode || !SEARCH_NODE_TYPES.has(sourceNode.type)) {
         throw new Error(`${zipNode.data.label || 'Zip Records'} ${inputHandle} must come from a planner search node.`);
       }
 
       const selected = getSelectedSearchResults(sourceNode);
       if (selected.length === 0) {
-        throw new Error(`${sourceNode.data.label || 'YouTube Search'} has no selected videos.`);
+        throw new Error(`${sourceNode.data.label || 'Planner Search'} has no selected results.`);
       }
       channels.push(selected);
 
@@ -240,7 +236,7 @@ export function getZipConnectionSummary(definition: PipelineDefinition, zipNodeI
     return [];
   }
 
-  const channelCount = getChannelCount(zipNode);
+  const channelCount = getZipChannelCount(getConfig(zipNode));
   const summary = [];
   for (let index = 1; index <= channelCount; index += 1) {
     const inputEdge = definition.edges.find(edge => edge.target === zipNode.id && edge.targetHandle === `input_${index}`);

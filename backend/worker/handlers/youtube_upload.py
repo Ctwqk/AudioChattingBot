@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import json
@@ -7,6 +8,7 @@ from worker.handlers.base import BaseHandler
 
 DAILY_UPLOAD_QUOTA_LIMIT = 10_000
 UPLOAD_INSERT_COST = 1_600
+logger = logging.getLogger("worker")
 
 
 class YouTubeUploadHandler(BaseHandler):
@@ -93,6 +95,17 @@ class YouTubeUploadHandler(BaseHandler):
         data["last_recorded_at"] = datetime.utcnow().isoformat() + "Z"
         self._save_quota_usage(cred_dir, data)
 
+    def _enforce_quota_estimate(self, cred_dir: str) -> None:
+        data = self._load_quota_usage(cred_dir)
+        used = int(data.get("estimated_units_used", 0) or 0)
+        limit = int(data.get("daily_limit", DAILY_UPLOAD_QUOTA_LIMIT) or DAILY_UPLOAD_QUOTA_LIMIT)
+        projected = used + UPLOAD_INSERT_COST
+        if projected > limit:
+            raise RuntimeError(
+                "Estimated YouTube upload quota would be exceeded "
+                f"({used}/{limit} used, next upload costs {UPLOAD_INSERT_COST})."
+            )
+
     async def _upload_youtube(
         self, video_path, title, description, privacy, made_for_kids, tags, cred_dir, client_secret
     ):
@@ -155,6 +168,7 @@ class YouTubeUploadHandler(BaseHandler):
             body=body,
             media_body=media,
         )
+        self._enforce_quota_estimate(cred_dir)
         self._record_quota_estimate(cred_dir, increment_units=True)
 
         response = None
@@ -164,10 +178,7 @@ class YouTubeUploadHandler(BaseHandler):
         video_id = response.get("id")
         self._record_quota_estimate(cred_dir, video_id=video_id)
 
-        import logging
-        logging.getLogger("worker").info(
-            f"YouTube upload complete: video_id={video_id}"
-        )
+        logger.info("YouTube upload complete: video_id=%s", video_id)
         return {
             "video_id": video_id,
             "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else None,

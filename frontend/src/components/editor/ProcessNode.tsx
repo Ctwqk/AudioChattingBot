@@ -1,7 +1,8 @@
 import { memo, useEffect } from 'react';
 import { Handle, Position, useConnection, useUpdateNodeInternals, type NodeProps } from '@xyflow/react';
-import * as LucideIcons from 'lucide-react';
 import useNodeTypes from '../../hooks/useNodeTypes';
+import NodeIcon from './NodeIcon';
+import { getZipChannelCount } from '../../utils/zipRecords';
 
 type ProcessNodeData = {
   label: string;
@@ -42,18 +43,6 @@ function formatPortLabel(name: string) {
   return name.replace(/_/g, ' ');
 }
 
-function NodeIcon({ name }: { name: string }) {
-  const key = name
-    .split('-')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join('');
-  const Icon = (LucideIcons as unknown as Record<string, React.ComponentType<{ size?: number }>>)[key];
-  if (!Icon) {
-    return <span style={{ fontSize: 16, lineHeight: 1 }}>⬡</span>;
-  }
-  return <Icon size={16} />;
-}
-
 function ProcessNode({ id, data, selected }: NodeProps) {
   const { nodeTypes } = useNodeTypes();
   const updateNodeInternals = useUpdateNodeInternals();
@@ -61,23 +50,16 @@ function ProcessNode({ id, data, selected }: NodeProps) {
   const typeName = nodeData.nodeType || 'unknown';
   const typeDef = nodeTypes.find(t => t.type_name === typeName);
 
-  const getChannelCount = () => {
-    const raw = nodeData.config?.channel_count;
-    const value = typeof raw === 'number' ? raw : Number(raw || 2);
-    if (!Number.isFinite(value)) {
-      return 2;
-    }
-    return Math.max(1, Math.trunc(value));
-  };
+  const zipChannelCount = getZipChannelCount(nodeData.config);
 
   const inputs = typeName === 'zip_records'
-    ? Array.from({ length: getChannelCount() }, (_, index) => ({
+    ? Array.from({ length: zipChannelCount }, (_, index) => ({
         name: `input_${index + 1}`,
         port_type: 'search_results',
       }))
     : (typeDef?.inputs || []);
   const outputs = typeName === 'zip_records'
-    ? Array.from({ length: getChannelCount() }, (_, index) => ({
+    ? Array.from({ length: zipChannelCount }, (_, index) => ({
         name: `output_${index + 1}`,
         port_type: 'url_value',
       }))
@@ -205,7 +187,7 @@ function ProcessNode({ id, data, selected }: NodeProps) {
       {/* Node content */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-          <NodeIcon name={icon} />
+          <NodeIcon name={icon} size={16} fallback={<span style={{ fontSize: 16, lineHeight: 1 }}>⬡</span>} />
         </span>
         <span style={{ fontWeight: 600 }}>{nodeData.label || typeDef?.display_name || typeName}</span>
       </div>

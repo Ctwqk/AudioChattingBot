@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     api_port: int = 8080
     cors_origins: list[str] = ["*"]
     exo_watchdog_url: str = "http://exo-watchdog.constructure-monitor.svc.cluster.local:8000"
+    platform_browser_manager_url: str = "http://localhost:8898"
 
     # Shared retrieval services
     embedding_gateway_url: str = "http://embedding-gateway.constructure-infra.svc.cluster.local:8080"

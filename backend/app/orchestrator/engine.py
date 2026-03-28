@@ -317,6 +317,7 @@ class JobEngine:
                     definition = PipelineDefinition.model_validate(job.pipeline_snapshot)
                     ne_by_node_id = {n.node_id: n for n in job.node_executions}
                     input_artifacts = {}
+                    preferred_hosts = self._preferred_hosts_for_node(ne_by_node_id, deps)
                     for edge in definition.edges:
                         if edge.target == ne.node_id:
                             upstream_ne = ne_by_node_id.get(edge.source)
@@ -334,6 +335,9 @@ class JobEngine:
                         "node_type": ne.node_type,
                         "config": json.dumps(ne.node_config),
                         "input_artifacts": json.dumps(input_artifacts),
+                        "preferred_hosts": json.dumps(preferred_hosts),
+                        "affinity_enqueued_at": str(int(time.time())),
+                        "affinity_bounces": "0",
                     }
                     stream_key = TASK_STREAM.format(worker_type=worker_type)
                     await r.xadd(stream_key, task)

@@ -1,4 +1,3 @@
-// Pipeline types
 export interface PipelineNode {
   id: string;
   type: string;
@@ -36,7 +35,6 @@ export interface Pipeline {
   version: number;
 }
 
-// Job types
 export type JobStatus = 'PENDING' | 'VALIDATING' | 'PLANNING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'PARTIALLY_FAILED';
 export type NodeStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED' | 'CANCELLED';
 
@@ -65,7 +63,6 @@ export interface NodeExecution {
   output_artifact_media_info?: Record<string, unknown> | null;
 }
 
-// Asset types
 export interface Asset {
   id: string;
   filename: string;
@@ -85,7 +82,6 @@ export interface MaterialLibrary {
   updated_at: string;
 }
 
-// Artifact types
 export type ArtifactKind = 'intermediate' | 'final';
 
 export interface Artifact {
@@ -99,7 +95,6 @@ export interface Artifact {
   created_at: string;
 }
 
-// Node type registry
 export interface PortDefinition {
   name: string;
   port_type: 'video' | 'audio' | 'image' | 'subtitle' | 'any_media' | 'search_results' | 'url_value' | 'asset_value';

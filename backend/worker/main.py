@@ -7,6 +7,7 @@ import socket
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -48,18 +49,53 @@ engine_db = create_async_engine(
 worker_session = async_sessionmaker(engine_db, expire_on_commit=False)
 
 
-async def _is_cancelled(node_execution_id: str) -> bool:
-    """Check DB to see if this node execution has been cancelled."""
+@dataclass(frozen=True)
+class CancelState:
+    job_id: uuid.UUID | None
+    node_status: NodeStatus | None
+    job_status: JobStatus | None
+    is_cancelled: bool
+    cancel_reason: str | None
+
+
+async def _load_cancel_state(node_execution_id: str) -> CancelState:
+    """Load node/job cancellation state for a worker task in a single DB session."""
     async with worker_session() as db:
         ne = await db.get(NodeExecution, uuid.UUID(node_execution_id))
-        if ne and ne.status == NodeStatus.CANCELLED:
-            return True
-        # Also check job-level cancellation
-        if ne:
-            job = await db.get(Job, ne.job_id)
-            if job and job.status == JobStatus.CANCELLED:
-                return True
-    return False
+        if not ne:
+            return CancelState(
+                job_id=None,
+                node_status=None,
+                job_status=None,
+                is_cancelled=False,
+                cancel_reason=None,
+            )
+
+        job = await db.get(Job, ne.job_id)
+        if ne.status == NodeStatus.CANCELLED:
+            return CancelState(
+                job_id=ne.job_id,
+                node_status=ne.status,
+                job_status=job.status if job else None,
+                is_cancelled=True,
+                cancel_reason="node_execution cancelled",
+            )
+        if job and job.status == JobStatus.CANCELLED:
+            return CancelState(
+                job_id=ne.job_id,
+                node_status=ne.status,
+                job_status=job.status,
+                is_cancelled=True,
+                cancel_reason="job cancelled",
+            )
+
+        return CancelState(
+            job_id=ne.job_id,
+            node_status=ne.status,
+            job_status=job.status if job else None,
+            is_cancelled=False,
+            cancel_reason=None,
+        )
 
 
 async def process_task(data: dict) -> None:
@@ -79,17 +115,19 @@ async def process_task(data: dict) -> None:
         return
 
     # Check if cancelled before starting, then update status to RUNNING
+    cancel_state = await _load_cancel_state(node_execution_id)
+    if cancel_state.is_cancelled:
+        logger.info(
+            "Skipping node %s for job %s before start: %s",
+            data["node_id"],
+            job_id,
+            cancel_state.cancel_reason,
+        )
+        return
+
     async with worker_session() as db:
         ne = await db.get(NodeExecution, uuid.UUID(node_execution_id))
         if ne:
-            if ne.status == NodeStatus.CANCELLED:
-                logger.info(f"Node {data['node_id']} already cancelled, skipping")
-                return
-            # Also check job-level cancel
-            job = await db.get(Job, ne.job_id)
-            if job and job.status == JobStatus.CANCELLED:
-                logger.info(f"Job {job_id} cancelled, skipping node {data['node_id']}")
-                return
             ne.status = NodeStatus.RUNNING
             ne.started_at = datetime.utcnow()
             ne.worker_id = WORKER_ID
@@ -103,8 +141,14 @@ async def process_task(data: dict) -> None:
     async def _cancel_watcher():
         while True:
             await asyncio.sleep(2)
-            if await _is_cancelled(node_execution_id):
-                logger.info(f"Cancel detected for node {data['node_id']}, killing handler")
+            cancel_state = await _load_cancel_state(node_execution_id)
+            if cancel_state.is_cancelled:
+                logger.info(
+                    "Cancel detected for node %s for job %s during execution: %s",
+                    data["node_id"],
+                    job_id,
+                    cancel_state.cancel_reason,
+                )
                 handler.cancel()
                 return
 
@@ -156,9 +200,11 @@ async def process_task(data: dict) -> None:
 
         file_size = os.path.getsize(output_local_path)
 
-        artifact_storage_backend = settings.storage_backend
-        artifact_storage_path = output_storage_path if settings.storage_backend != "local" else str(output_local_path)
-        artifact_media_info = handler_result if isinstance(handler_result, dict) else None
+        artifact_storage_backend, artifact_storage_path = _resolve_artifact_storage(
+            output_local_path=output_local_path,
+            output_storage_path=output_storage_path,
+        )
+        artifact_media_info = None
         skip_upload = False
 
         if isinstance(handler_result, dict):
@@ -273,6 +319,13 @@ def _guess_mime(ext: str) -> str:
         ".wav": "audio/wav",
         ".mp3": "audio/mpeg",
     }.get(ext, "video/mp4")
+
+
+def _resolve_artifact_storage(*, output_local_path: str, output_storage_path: str) -> tuple[str, str]:
+    storage_backend = settings.storage_backend
+    if storage_backend == "local":
+        return storage_backend, output_local_path
+    return storage_backend, output_storage_path
 
 
 async def _reclaim_pending(r: aioredis.Redis) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import abc
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -57,6 +58,14 @@ class BaseHandler(abc.ABC):
 
     def gpu_busy_mem_threshold(self) -> int:
         return int(os.environ.get("VIDEO_GPU_BUSY_MEM_THRESHOLD", "92"))
+
+    @staticmethod
+    def parse_bool_param(value, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def preferred_video_codec(self, codec: str | None = None) -> str:
         selected = codec or "libx264"
@@ -127,7 +136,6 @@ class BaseHandler(abc.ABC):
     def _rewrite_hardware_args_for_cpu(self, args: list[str]) -> list[str]:
         rewritten: list[str] = []
         removed_cq: str | None = None
-        removed_qv: str | None = None
         has_crf = False
         i = 0
         while i < len(args):
@@ -147,10 +155,6 @@ class BaseHandler(abc.ABC):
                 removed_cq = nxt
                 i += 2
                 continue
-            if token == "-q:v" and nxt is not None:
-                removed_qv = nxt
-                i += 2
-                continue
             if token == "-rc:v" and nxt is not None:
                 i += 2
                 continue
@@ -158,10 +162,9 @@ class BaseHandler(abc.ABC):
             rewritten.append(token)
             i += 1
 
-        replacement_crf = removed_cq or removed_qv
-        if replacement_crf is not None and not has_crf:
+        if removed_cq is not None and not has_crf:
             insert_at = len(rewritten) - 1 if rewritten and not rewritten[-1].startswith("-") else len(rewritten)
-            rewritten[insert_at:insert_at] = ["-crf", replacement_crf]
+            rewritten[insert_at:insert_at] = ["-crf", removed_cq]
 
         return rewritten
 
@@ -246,9 +249,11 @@ class BaseHandler(abc.ABC):
         if self._cancelled:
             raise CancelledError("Node cancelled before ffmpeg started")
 
-        ffmpeg_args = args
+        ffmpeg_args = list(args)
+        retried_on_cpu = False
         if self._contains_hardware_codec(ffmpeg_args) and await self._gpu_looks_busy():
             ffmpeg_args = self._rewrite_hardware_args_for_cpu(ffmpeg_args)
+            retried_on_cpu = True
 
         cmd = ["ffmpeg", "-y", "-hide_banner"] + ffmpeg_args
         logger.info(f"Running: {' '.join(cmd)}")
@@ -264,7 +269,7 @@ class BaseHandler(abc.ABC):
             raise CancelledError("Node cancelled during ffmpeg execution")
         if self._proc.returncode != 0:
             if (
-                ffmpeg_args is args
+                not retried_on_cpu
                 and self._contains_hardware_codec(ffmpeg_args)
                 and self.gpu_fallback_enabled()
                 and self._is_gpu_capacity_error(stderr_text)
@@ -290,7 +295,6 @@ class BaseHandler(abc.ABC):
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             return {}
-        import json
         try:
             return json.loads(stdout.decode())
         except Exception:

@@ -1,15 +1,18 @@
 from __future__ import annotations
+import logging
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.api.downloads import build_download_response
 from app.db import get_db
 from app.models.asset import Asset
 from app.models.artifact import Artifact, ArtifactKind
 from app.models.job import Job, JobStatus, NodeExecution
 from app.schemas.artifact import ArtifactResponse
 from app.storage.manager import get_storage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/artifacts", tags=["artifacts"])
 
@@ -57,6 +60,9 @@ async def cleanup_intermediates(
     rows = list(result.all())
 
     terminal_cache: dict[uuid.UUID, set[str]] = {}
+    node_ids_by_job: dict[uuid.UUID, set[str]] = {}
+    for _, _, node in rows:
+        node_ids_by_job.setdefault(node.job_id, set()).add(node.node_id)
 
     deleted_count = 0
     freed_bytes = 0
@@ -66,7 +72,7 @@ async def cleanup_intermediates(
             snapshot = job.pipeline_snapshot or {}
             edges = snapshot.get("edges", [])
             edge_sources = {edge.get("source") for edge in edges if isinstance(edge, dict)}
-            node_ids = {node.node_id for _, _, node in rows if node.job_id == job.id}
+            node_ids = node_ids_by_job.get(job.id, set())
             terminal_nodes = {node_id for node_id in node_ids if node_id not in edge_sources}
             terminal_cache[job.id] = terminal_nodes
 
@@ -104,8 +110,13 @@ async def cleanup_intermediates(
         if not shared_asset.scalar_one_or_none() and not shared_artifact.scalar_one_or_none():
             try:
                 await get_storage(artifact.storage_backend).delete(artifact.storage_path)
-            except Exception:
-                pass  # file may already be gone
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete artifact payload %s:%s during cleanup: %s",
+                    artifact.storage_backend,
+                    artifact.storage_path,
+                    exc,
+                )
 
         freed_bytes += artifact.file_size or 0
         node_execution.output_artifact_id = None
@@ -126,18 +137,9 @@ async def download_artifact(artifact_id: uuid.UUID, db: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="Artifact not found")
 
     storage = get_storage(artifact.storage_backend)
-    local_path = storage.get_local_path(artifact.storage_path)
-
-    if local_path:
-        return FileResponse(
-            path=local_path,
-            filename=artifact.filename,
-            media_type=artifact.mime_type or "application/octet-stream",
-        )
-    else:
-        content = await storage.read(artifact.storage_path)
-        return StreamingResponse(
-            iter([content]),
-            media_type=artifact.mime_type or "application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{artifact.filename}"'},
-        )
+    return await build_download_response(
+        storage=storage,
+        storage_path=artifact.storage_path,
+        filename=artifact.filename,
+        media_type=artifact.mime_type,
+    )

@@ -59,13 +59,7 @@ export function useYouTubeAuth() {
         if (!contentType.includes('application/json')) {
           throw new Error('YouTube auth service returned a non-JSON response');
         }
-        const raw = await response.text();
-        let data: YouTubeAuthStatus;
-        try {
-          data = JSON.parse(raw) as YouTubeAuthStatus;
-        } catch {
-          throw new Error('YouTube auth status response could not be parsed');
-        }
+        const data = await response.json() as YouTubeAuthStatus;
         setAuthStatus(data);
         window.localStorage.setItem(AUTH_STATUS_STORAGE_KEY, JSON.stringify(data));
         setAuthError(null);

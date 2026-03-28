@@ -1,16 +1,6 @@
-import React from 'react';
-import * as LucideIcons from 'lucide-react';
 import useNodeTypes from '../../hooks/useNodeTypes';
 import type { NodeTypeInfo } from '../../api/types';
-
-function NodeIcon({ name }: { name: string }) {
-  const key = name.split('-').map((w, i) =>
-    i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w.charAt(0).toUpperCase() + w.slice(1)
-  ).join('');
-  const Icon = (LucideIcons as unknown as Record<string, React.ComponentType<{ size?: number }>>)[key];
-  if (!Icon) return <span style={{ width: 16 }} />;
-  return <Icon size={14} />;
-}
+import NodeIcon from './NodeIcon';
 
 interface NodePaletteProps {
   onAddNode: (typeName: string) => void;
@@ -71,7 +61,7 @@ export default function NodePalette({ onAddNode }: NodePaletteProps) {
               onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
               title={nt.description}
             >
-              <NodeIcon name={nt.icon} />
+              <NodeIcon name={nt.icon} size={14} fallback={<span style={{ width: 16 }} />} />
               <span>{nt.display_name}</span>
             </div>
           ))}

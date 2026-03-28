@@ -1,10 +1,4 @@
 import type { CSSProperties } from 'react';
-import type { PipelineDefinition } from '../../api/types';
-import { buildBatchItems } from '../../utils/plannerBatch';
-
-export function buildBatchExample(definition: PipelineDefinition): Array<Record<string, unknown>> {
-  return buildBatchItems(definition);
-}
 
 export function parseBatchItems(input: string): Array<Record<string, unknown>> {
   const parsed = JSON.parse(input);

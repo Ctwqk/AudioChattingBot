@@ -7,7 +7,6 @@ import platform
 import re
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import httpx
 
@@ -417,9 +416,6 @@ class SubtitleToSpeechHandler(BaseHandler):
         configured = str(os.environ.get("VIDEO_MINIMAX_TTS_VOICE_ID", "") or "").strip()
         if configured:
             return configured
-        normalized = language.lower()
-        if normalized.startswith("zh"):
-            return "female-shaonv"
         return "female-shaonv"
 
     async def _synthesize_cue_with_minimax(
@@ -522,17 +518,16 @@ class SubtitleToSpeechHandler(BaseHandler):
         ])
         return tmp_file.name
 
-    async def _synthesize_cue_with_local_service(
+    async def _post_local_tts_stream(
         self,
         *,
         client: httpx.AsyncClient,
         text: str,
         language: str,
-        output_path: str,
         reference_audio_path: str | None,
-        speaker_id: Optional[str],
-    ) -> str:
-        files = {}
+        speaker_id: str | None,
+    ) -> httpx.Response:
+        files: dict[str, tuple[str, object, str]] = {}
         data = {"text": text, "language": language}
         if speaker_id:
             data["speaker_id"] = speaker_id
@@ -543,36 +538,63 @@ class SubtitleToSpeechHandler(BaseHandler):
                 "audio/wav",
             )
         try:
-            response = await client.post("/v1/tts/stream", data=data, files=files or None)
-            if speaker_id and response.status_code >= 400 and reference_audio_path:
-                logger.warning(
-                    "Local TTS request with speaker_id %s failed (%s); retrying with speaker_wav upload",
-                    speaker_id,
-                    response.status_code,
-                )
-                retry_file = open(reference_audio_path, "rb")
-                try:
-                    response = await client.post(
-                        "/v1/tts/stream",
-                        data={"text": text, "language": language},
-                        files={
-                            "speaker_wav": (
-                                Path(reference_audio_path).name,
-                                retry_file,
-                                "audio/wav",
-                            )
-                        },
-                    )
-                finally:
-                    retry_file.close()
-            response.raise_for_status()
-            with open(output_path, "wb") as handle:
-                handle.write(response.content)
-            return str(response.headers.get("x-tts-provider") or "local").strip().lower() or "local"
+            return await client.post("/v1/tts/stream", data=data, files=files or None)
         finally:
             upload = files.get("speaker_wav")
             if upload:
                 upload[1].close()
+
+    async def _synthesize_cue_with_local_base_url(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        text: str,
+        language: str,
+        output_path: str,
+        reference_audio_path: str | None,
+        speaker_id: str | None,
+    ) -> tuple[str, str | None]:
+        last_exc: Exception | None = None
+
+        if speaker_id:
+            try:
+                response = await self._post_local_tts_stream(
+                    client=client,
+                    text=text,
+                    language=language,
+                    reference_audio_path=None,
+                    speaker_id=speaker_id,
+                )
+                response.raise_for_status()
+                with open(output_path, "wb") as handle:
+                    handle.write(response.content)
+                provider = str(response.headers.get("x-tts-provider") or "local").strip().lower() or "local"
+                return provider, speaker_id
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Local TTS request with speaker_id %s failed; falling back to speaker_wav upload: %s",
+                    speaker_id,
+                    exc,
+                )
+
+        if reference_audio_path:
+            response = await self._post_local_tts_stream(
+                client=client,
+                text=text,
+                language=language,
+                reference_audio_path=reference_audio_path,
+                speaker_id=None,
+            )
+            response.raise_for_status()
+            with open(output_path, "wb") as handle:
+                handle.write(response.content)
+            provider = str(response.headers.get("x-tts-provider") or "local").strip().lower() or "local"
+            return provider, None
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Local TTS requires either a speaker_id or reference audio")
 
     async def _try_register_local_speaker(
         self,
@@ -582,7 +604,7 @@ class SubtitleToSpeechHandler(BaseHandler):
         client: httpx.AsyncClient,
         reference_audio_path: str,
         speaker_text: str | None,
-    ) -> tuple[Optional[str], httpx.AsyncClient, str]:
+    ) -> tuple[str | None, httpx.AsyncClient, str]:
         last_exc: Exception | None = None
         ordered_urls = [current_base_url] + [url for url in tts_base_urls if url != current_base_url]
         for base_url in ordered_urls:
@@ -613,9 +635,9 @@ class SubtitleToSpeechHandler(BaseHandler):
         language: str,
         output_path: str,
         reference_audio_path: str | None,
-        speaker_id: Optional[str],
+        speaker_id: str | None,
         speaker_text: str | None,
-    ) -> tuple[str, httpx.AsyncClient, str, Optional[str]]:
+    ) -> tuple[str, httpx.AsyncClient, str, str | None]:
         ordered_urls = [current_base_url] + [url for url in tts_base_urls if url != current_base_url]
         last_exc: Exception | None = None
         current_speaker_id = speaker_id
@@ -639,9 +661,8 @@ class SubtitleToSpeechHandler(BaseHandler):
                             base_url,
                             exc,
                         )
-                        current_speaker_id = None
             try:
-                provider = await self._synthesize_cue_with_local_service(
+                provider, next_speaker_id = await self._synthesize_cue_with_local_base_url(
                     client=active_client,
                     text=text,
                     language=language,
@@ -649,7 +670,7 @@ class SubtitleToSpeechHandler(BaseHandler):
                     reference_audio_path=reference_audio_path,
                     speaker_id=current_speaker_id,
                 )
-                return provider, active_client, base_url, current_speaker_id
+                return provider, active_client, base_url, next_speaker_id
             except Exception as exc:
                 last_exc = exc
                 logger.warning("Local TTS synthesis failed on %s for current block: %s", base_url, exc)

@@ -27,7 +27,7 @@ export default function AppShell() {
           backgroundColor: '#020617',
         }}
       >
-        <div style={{ flex: 1, overflow: 'hidden', backgroundColor: '#020617' }}>
+        <div style={{ flex: 1, overflow: 'hidden' }}>
           <Outlet />
         </div>
       </main>

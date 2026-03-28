@@ -28,7 +28,7 @@ class MaterialLibraryIngestHandler(BaseHandler):
         clip_len = float(node_config.get("clip_len", 8) or 8)
         stride = float(node_config.get("stride", 4) or 4)
         subtitle_mode = str(node_config.get("subtitle_mode", "asr_if_missing") or "asr_if_missing")
-        store_neighbors = self._bool_param(node_config.get("store_neighbors"), True)
+        store_neighbors = self.parse_bool_param(node_config.get("store_neighbors"), True)
         source_probe = await self.run_ffprobe(video_path)
         fallback_media_info = {
             "duration": float((source_probe.get("format", {}) or {}).get("duration", 0) or 0),
@@ -99,11 +99,3 @@ class MaterialLibraryIngestHandler(BaseHandler):
         for raw in raw_values:
             parsed.append(uuid.UUID(str(raw)))
         return parsed
-
-    @staticmethod
-    def _bool_param(value, default: bool) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}

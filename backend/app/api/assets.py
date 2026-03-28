@@ -1,8 +1,8 @@
 from __future__ import annotations
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.api.downloads import build_download_response
 from app.db import get_db
 from app.schemas.asset import AssetResponse, AssetListResponse
 from app.services.asset_service import upload_asset, get_asset, list_assets, delete_asset
@@ -68,21 +68,12 @@ async def download(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Asset not found")
 
     storage = get_storage(asset.storage_backend)
-    local_path = storage.get_local_path(asset.storage_path)
-
-    if local_path:
-        return FileResponse(
-            path=local_path,
-            filename=asset.original_name,
-            media_type=asset.mime_type or "application/octet-stream",
-        )
-    else:
-        content = await storage.read(asset.storage_path)
-        return StreamingResponse(
-            iter([content]),
-            media_type=asset.mime_type or "application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{asset.original_name}"'},
-        )
+    return await build_download_response(
+        storage=storage,
+        storage_path=asset.storage_path,
+        filename=asset.original_name,
+        media_type=asset.mime_type,
+    )
 
 
 @router.delete("/{asset_id}")

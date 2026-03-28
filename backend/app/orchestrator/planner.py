@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from app.schemas.pipeline import PipelineDefinition
 
-PLANNER_NODE_TYPES = {"youtube_search", "material_search", "zip_records"}
+SEARCH_NODE_TYPES = {
+    "youtube_search",
+    "xiaohongshu_search",
+    "bilibili_search",
+    "material_search",
+}
+PLANNER_NODE_TYPES = SEARCH_NODE_TYPES | {"zip_records"}
 SEARCH_RESULTS_HANDLE = "results"
 ZIP_INPUT_PREFIX = "input_"
 ZIP_OUTPUT_PREFIX = "output_"
@@ -12,6 +18,10 @@ ASSET_INPUT_HANDLE = "asset_input"
 
 def is_planner_node_type(type_name: str) -> bool:
     return type_name in PLANNER_NODE_TYPES
+
+
+def is_search_node_type(type_name: str) -> bool:
+    return type_name in SEARCH_NODE_TYPES
 
 
 def get_zip_channel_count(config: dict | None) -> int:
