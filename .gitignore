@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+**/*venv/
+**/.pip-cache/
 
 # IDE / OS
 .DS_Store
@@ -48,6 +50,10 @@ frontend/dist/
 
 # Storage
 /data/
+PlatformBrowserManager/browser-profiles/
+**/browser-profiles/
+PlatformBrowserManager/downloads/
+**/speaker-cache/
 
 # Docker volumes
 pg_data/
