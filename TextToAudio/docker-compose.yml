@@ -2,8 +2,7 @@ services:
   xtts-api:
     build: .
     container_name: xtts_v2_api
-    ports:
-      - "8000:8000"
+    network_mode: host
     environment:
       - USE_GPU=true
       - TTS_DEVICE=cuda
@@ -11,21 +10,11 @@ services:
       - OUTPUT_DIR=/app/output
       - SPEAKER_CACHE_DIR=/app/speaker-cache
       - COQUI_TOS_AGREED=1
-      - DEFAULT_SPEAKER_WAV=/home/taiwei/VideoProcess/TextToAudio/voicesource/sample.wav
+      - DEFAULT_SPEAKER_WAV=/app/voicesource/sample.wav
     volumes:
       - ./output:/app/output
       - ./models:/root/.local/share/tts
       - ./speaker-cache:/app/speaker-cache
-      - /home/taiwei/VideoProcess/TextToAudio/voicesource:/home/taiwei/VideoProcess/TextToAudio/voicesource:ro
+      - ./voicesource:/app/voicesource:ro
     gpus: all
     restart: unless-stopped
-    networks:
-      videoprocess_net:
-        aliases:
-          - xtts-api
-          - xtts_v2_api
-
-networks:
-  videoprocess_net:
-    external: true
-

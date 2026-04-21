@@ -48,6 +48,11 @@ select_worker_targets() {
 install_vp_worker() {
   local target="$1"
   local worker_host=""
+  local vp_database_url="${VP_DATABASE_URL:-postgresql+asyncpg://vp:vp_secret@$MAIN_HOST:$MAIN_SHARED_POSTGRES_PORT/videoprocess}"
+  local vp_redis_url="${VP_REDIS_URL:-redis://$MAIN_HOST:$MAIN_VP_REDIS_PORT/0}"
+  local vp_minio_endpoint="${VP_MINIO_ENDPOINT:-$MAIN_HOST:$MAIN_MINIO_PORT}"
+  local vp_llm_base_url="${VP_LLM_BASE_URL:-http://$MAIN_HOST:$MAIN_WATCHDOG_PORT/v1}"
+  local vp_xtts_fallback_url="${VP_XTTS_FALLBACK_BASE_URL:-http://$MAIN_HOST:$MAIN_XTTS_PORT}"
   if [ "$target" = "$MAC1_TARGET" ]; then
     worker_host="wenjie"
   elif [ "$target" = "$MAC2_TARGET" ]; then
@@ -80,11 +85,12 @@ install_vp_worker() {
     fi
     cat > ~/Constructure/services/vp-worker/vp-worker.env <<EOF
 PYTHONPATH=\$HOME/Constructure/VideoProcess/backend
-DATABASE_URL=postgresql+asyncpg://vp:vp_secret@$MAIN_HOST:5432/videoprocess
-REDIS_URL=redis://$MAIN_HOST:6379/0
+DEPLOY_MODE=shared
+DATABASE_URL=$vp_database_url
+REDIS_URL=$vp_redis_url
 STORAGE_BACKEND=minio
 STORAGE_LOCAL_ROOT=\$HOME/ConstructureData/vp-worker-storage
-MINIO_ENDPOINT=$MAIN_HOST:9000
+MINIO_ENDPOINT=$vp_minio_endpoint
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET=videoprocess
@@ -99,9 +105,9 @@ VIDEO_USE_GPU=false
 VIDEO_USE_VIDEOTOOLBOX=true
 VIDEO_WHISPER_DEVICE=cpu
 VIDEO_WHISPER_COMPUTE_TYPE=int8
-VIDEO_LLM_BASE_URL=http://$MAIN_HOST:8000/v1
+VIDEO_LLM_BASE_URL=$vp_llm_base_url
 VIDEO_TTS_BASE_URL=http://127.0.0.1:8010
-VIDEO_TTS_FALLBACK_BASE_URL=http://$MAIN_HOST:8010
+VIDEO_TTS_FALLBACK_BASE_URL=$vp_xtts_fallback_url
 MINIMAX_API_KEY=\$minimax_api_key
 VIDEO_MINIMAX_TTS_BASE_URL=https://api.minimaxi.com/v1
 VIDEO_MINIMAX_TTS_MODEL=speech-2.8-hd

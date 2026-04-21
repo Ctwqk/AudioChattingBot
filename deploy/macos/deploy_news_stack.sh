@@ -39,6 +39,11 @@ select_news_target() {
 
 install_news_stack() {
   local target="$1"
+  local news_database_url="${NEWS_DATABASE_URL:-postgresql://news:newspass@$MAIN_HOST:$MAIN_SHARED_POSTGRES_PORT/news}"
+  local qdrant_host="${NEWS_QDRANT_HOST:-$MAIN_HOST}"
+  local qdrant_port="${NEWS_QDRANT_PORT:-$MAIN_QDRANT_PORT}"
+  local llm_base_url="${NEWS_LLM_BASE_URL:-http://$MAIN_HOST:$MAIN_WATCHDOG_PORT/v1}"
+  local watchdog_url="${NEWS_WATCHDOG_URL:-http://$MAIN_HOST:$MAIN_WATCHDOG_PORT}"
   log_section "install_news_stack $target"
   rsync_push "$CONSTRUCTURE_ROOT/embedding-gateway/" "$target" "~/Constructure/embedding-gateway/"
   rsync_push "$CONSTRUCTURE_ROOT/news/collector/" "$target" "~/Constructure/news/collector/"
@@ -66,15 +71,16 @@ install_news_stack() {
     cat > ~/Constructure/services/embedding-gateway/env <<EOF
 EMBED_MODEL=all-MiniLM-L6-v2
 EMBED_DEVICE=cpu
-PATH=\$HOME/.local/bin:\$PATH
+    PATH=\$HOME/.local/bin:\$PATH
 EOF
     cat > ~/Constructure/services/news-collector/env <<EOF
-DATABASE_URL=postgresql://news:newspass@$MAIN_HOST:5434/news
+DEPLOY_MODE=shared
+DATABASE_URL=$news_database_url
 FETCH_INTERVAL=900
 FETCH_CONCURRENCY=8
 CONTENT_CONCURRENCY=4
-QDRANT_HOST=$MAIN_HOST
-QDRANT_PORT=6333
+QDRANT_HOST=$qdrant_host
+QDRANT_PORT=$qdrant_port
 QDRANT_BATCH_SIZE=25
 QDRANT_TIMEOUT_SECONDS=120
 QDRANT_UPSERT_RETRIES=3
@@ -84,16 +90,17 @@ CHUNK_SIZE=512
 RETENTION_DAYS=30
 EMBED_DEVICE=cpu
 EMBEDDING_GATEWAY_URL=http://127.0.0.1:8080
-LLM_BASE_URL=http://$MAIN_HOST:8000/v1
-EXO_WATCHDOG_URL=http://$MAIN_HOST:8000
+LLM_BASE_URL=$llm_base_url
+EXO_WATCHDOG_URL=$watchdog_url
 FEED_URLS_FILE=\$HOME/Constructure/worldmonitor-hourly/config/feed-urls.txt
 PATH=\$HOME/.local/bin:\$PATH
 EOF
     cat > ~/Constructure/services/news-server/env <<EOF
-DATABASE_URL=postgresql://news:newspass@$MAIN_HOST:5434/news
+DEPLOY_MODE=shared
+DATABASE_URL=$news_database_url
 PORT=6551
-QDRANT_HOST=$MAIN_HOST
-QDRANT_PORT=6333
+QDRANT_HOST=$qdrant_host
+QDRANT_PORT=$qdrant_port
 EMBED_DEVICE=cpu
 EMBEDDING_GATEWAY_URL=http://127.0.0.1:8080
 PATH=\$HOME/.local/bin:\$PATH

@@ -18,6 +18,8 @@ from app.node_registry.builtin import (
     trim,
     url_download,
     watermark,
+    x_search,
+    x_upload,
     xiaohongshu_search,
     youtube_search,
     youtube_upload,
@@ -43,11 +45,13 @@ BUILTIN_MODULES = (
     material_library_ingest,
     material_search,
     youtube_search,
+    x_search,
     xiaohongshu_search,
     bilibili_search,
     zip_records,
     export,
     youtube_upload,
+    x_upload,
 )
 
 __all__ = [

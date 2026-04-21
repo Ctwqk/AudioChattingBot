@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.artifacts import router as artifacts_router
 from app.api.assets import router as assets_router
+from app.api.internal_schedule import router as internal_schedule_router
 from app.api.jobs import router as jobs_router
 from app.api.llm import router as llm_router
 from app.api.materials import router as materials_router
@@ -20,6 +21,13 @@ from app.db import async_session
 from app.models.job import Job, JobStatus, NodeStatus
 from app.orchestrator.engine import engine
 from app.orchestrator.event_listener import event_listener
+from app.services.schedule_service import (
+    VideoScheduleState,
+    defer_job_until_next_window,
+    get_video_schedule_state,
+    is_job_fresh_submission,
+    load_video_jobs_for_recovery,
+)
 
 logger = logging.getLogger(__name__)
 STALE_NODE_RECOVERY_THRESHOLD = timedelta(minutes=10)
@@ -71,25 +79,28 @@ async def _prepare_job_for_recovery(db, job) -> bool:
 
 async def _recover_stale_jobs():
     """On startup, find PENDING/RUNNING jobs and restart them."""
-
     async with async_session() as db:
-        stmt = (
-            select(Job)
-            .where(Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PLANNING]))
-            .options(selectinload(Job.node_executions))
-        )
-        result = await db.execute(stmt)
-        stale_jobs = list(result.scalars().all())
-
+        schedule_state = await get_video_schedule_state(db)
+        stale_jobs = await load_video_jobs_for_recovery(db)
+        jobs_to_restart: list[Job] = []
         for job in stale_jobs:
+            if schedule_state == VideoScheduleState.CLOSED:
+                await defer_job_until_next_window(db, job)
+                continue
+
+            if schedule_state == VideoScheduleState.DRAINING and is_job_fresh_submission(job):
+                job.status = JobStatus.WAITING_WINDOW
+                await db.commit()
+                continue
+
             changed = await _prepare_job_for_recovery(db, job)
-            if not changed:
-                await engine._maybe_finalize_job(db, job)
+            if changed or job.status in (JobStatus.PENDING, JobStatus.WAITING_WINDOW):
+                jobs_to_restart.append(job)
+                continue
+            await engine._maybe_finalize_job(db, job)
         await db.commit()
 
-    for job in stale_jobs:
-        if job.status not in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PLANNING):
-            continue
+    for job in jobs_to_restart:
         logger.info(f"Recovering stale job {job.id} (status={job.status.value})")
         asyncio.create_task(engine.start_job(job.id))
 
@@ -132,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(llm_router)
     app.include_router(materials_router)
+    app.include_router(internal_schedule_router)
 
     @app.get("/health")
     async def health():

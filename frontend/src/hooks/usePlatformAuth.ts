@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export type PlatformKey = 'xiaohongshu' | 'bilibili';
+export type PlatformKey = 'x' | 'xiaohongshu' | 'bilibili';
 
 export type PlatformAuthStatus = {
   platform: PlatformKey;
@@ -14,6 +14,7 @@ export type PlatformAuthStatus = {
 };
 
 const AUTH_STATUS_RETRY_DELAYS_MS = [0, 500, 1500];
+const AUTH_MESSAGE_TYPE = 'vp-platform-auth';
 
 function sleep(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
@@ -116,9 +117,20 @@ export function usePlatformAuth(platform: PlatformKey) {
       void refreshAuthStatus();
     }
 
+    function handleMessage(event: MessageEvent) {
+      if (event.origin !== window.location.origin) return;
+      if (!event.data || typeof event.data !== 'object') return;
+      const payload = event.data as { type?: string; platform?: PlatformKey };
+      if (payload.type !== AUTH_MESSAGE_TYPE) return;
+      if (payload.platform !== platform) return;
+      void refreshAuthStatus();
+    }
+
     window.addEventListener('focus', handleFocus);
+    window.addEventListener('message', handleMessage);
     return () => {
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('message', handleMessage);
     };
   }, [platform]);
 

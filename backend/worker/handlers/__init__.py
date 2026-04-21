@@ -15,6 +15,7 @@ from worker.handlers.replace_audio import ReplaceAudioHandler
 from worker.handlers.transcode import TranscodeHandler
 from worker.handlers.url_download import UrlDownloadHandler
 from worker.handlers.export import ExportHandler
+from worker.handlers.platform_publish import XUploadHandler, XiaohongshuUploadHandler
 from worker.handlers.youtube_upload import YouTubeUploadHandler
 from worker.handlers.material_library_ingest import MaterialLibraryIngestHandler
 
@@ -37,4 +38,6 @@ HANDLER_MAP: dict[str, type[BaseHandler]] = {
     "material_library_ingest": MaterialLibraryIngestHandler,
     "export": ExportHandler,
     "youtube_upload": YouTubeUploadHandler,
+    "x_upload": XUploadHandler,
+    "xiaohongshu_upload": XiaohongshuUploadHandler,
 }

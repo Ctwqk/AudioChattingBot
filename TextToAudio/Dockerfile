@@ -22,8 +22,8 @@ RUN python3 -m pip install --upgrade pip && \
     python3 -m pip install -r /app/requirements.txt
 
 COPY app /app/app
-COPY output /app/output
+RUN mkdir -p /app/output /app/speaker-cache /app/voicesource /root/.local/share/tts
 
-EXPOSE 8000
+EXPOSE 8010
 
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8010"]

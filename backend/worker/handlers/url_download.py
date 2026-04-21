@@ -37,7 +37,7 @@ class UrlDownloadHandler(BaseHandler):
         logger.info("URL download cache miss for %s (%s)", normalized_url, fmt)
 
         platform = self._detect_platform(normalized_url)
-        if platform in {"xiaohongshu", "bilibili"}:
+        if platform in {"xiaohongshu", "bilibili", "x"}:
             await self._download_via_platform_manager(platform, normalized_url, fmt, output_path)
         else:
             await self._download_via_ytdlp(normalized_url, fmt, output_path)
@@ -89,7 +89,7 @@ class UrlDownloadHandler(BaseHandler):
             raise RuntimeError(self._format_download_error(normalized_url, self._proc.returncode, stderr_text))
 
     async def _download_via_platform_manager(self, platform: str, normalized_url: str, fmt: str, output_path: str) -> None:
-        base_url = settings.platform_browser_manager_url.rstrip("/")
+        base_url = self._platform_manager_base_url(platform)
         request_url = f"{base_url}/api/platforms/{platform}/download"
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
@@ -142,6 +142,16 @@ class UrlDownloadHandler(BaseHandler):
                 )) from exc
 
     @staticmethod
+    def _platform_manager_base_url(platform: str) -> str:
+        if platform == "xiaohongshu" and settings.xiaohongshu_platform_browser_manager_url:
+            return settings.xiaohongshu_platform_browser_manager_url.rstrip("/")
+        if platform == "bilibili" and settings.bilibili_platform_browser_manager_url:
+            return settings.bilibili_platform_browser_manager_url.rstrip("/")
+        if platform == "x" and settings.x_platform_browser_manager_url:
+            return settings.x_platform_browser_manager_url.rstrip("/")
+        return settings.platform_browser_manager_url.rstrip("/")
+
+    @staticmethod
     def _cache_storage_path(url: str, fmt: str, output_path: str) -> str:
         cache_key = hashlib.sha256(f"{url}\n{fmt}".encode("utf-8")).hexdigest()
         suffix = Path(output_path).suffix or ".mp4"
@@ -170,6 +180,10 @@ class UrlDownloadHandler(BaseHandler):
         xiaohongshu_note_id = UrlDownloadHandler._extract_xiaohongshu_note_id(url)
         if xiaohongshu_note_id:
             return f"https://www.xiaohongshu.com/explore/{xiaohongshu_note_id}"
+
+        x_post_id, x_screen_name = UrlDownloadHandler._extract_x_post_components(url)
+        if x_post_id and x_screen_name:
+            return f"https://x.com/{x_screen_name}/status/{x_post_id}"
 
         normalized_query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
         cleaned = parsed._replace(
@@ -210,6 +224,8 @@ class UrlDownloadHandler(BaseHandler):
             return "xiaohongshu"
         if any(domain in host for domain in ("bilibili.com", "b23.tv")):
             return "bilibili"
+        if any(domain in host for domain in ("x.com", "twitter.com")):
+            return "x"
         if any(domain in host for domain in ("youtube.com", "youtu.be")):
             return "youtube"
         return None
@@ -223,6 +239,13 @@ class UrlDownloadHandler(BaseHandler):
     def _extract_xiaohongshu_note_id(url: str) -> str | None:
         match = re.search(r"([0-9a-f]{24})", url, flags=re.IGNORECASE)
         return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_x_post_components(url: str) -> tuple[str | None, str | None]:
+        match = re.search(r"(?:x|twitter)\.com/([^/]+)/status/(\d+)", url, flags=re.IGNORECASE)
+        if not match:
+            return None, None
+        return match.group(2), match.group(1)
 
     @staticmethod
     async def _extract_error_detail(response: httpx.Response) -> str:

@@ -12,6 +12,11 @@ export default defineConfig({
         target: 'http://localhost:8080',
         ws: true,
       },
+      '/platforms/api/platforms/xiaohongshu': {
+        target: 'http://localhost:8897',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/platforms/, ''),
+      },
       '/youtube': {
         target: 'http://localhost:3001',
         changeOrigin: true,
@@ -19,6 +24,7 @@ export default defineConfig({
       '/platforms': {
         target: 'http://localhost:8898',
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/platforms/, ''),
       },
     },
   },

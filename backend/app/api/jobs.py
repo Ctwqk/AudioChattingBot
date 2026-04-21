@@ -11,7 +11,7 @@ from app.services.job_service import (
     create_job, create_job_from_snapshot, get_job, list_jobs, cancel_job, delete_job,
 )
 from app.services.job_runtime import (
-    start_jobs_background,
+    start_or_defer_jobs,
     to_job_detail_response,
     to_job_response,
 )
@@ -26,7 +26,7 @@ async def submit_job(data: JobCreate, db: AsyncSession = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    await start_jobs_background([job.id])
+    await start_or_defer_jobs(db, [job])
     return await to_job_detail_response(db, job)
 
 
@@ -67,7 +67,7 @@ async def submit_batch(data: BatchJobCreate, db: AsyncSession = Depends(get_db))
     """Submit multiple jobs for the same pipeline with different inputs."""
     jobs = await create_jobs_or_400(db, uuid.UUID(data.pipeline_id), data.inputs)
 
-    await start_jobs_background(job.id for job in jobs)
+    await start_or_defer_jobs(db, jobs)
     return [await to_job_detail_response(db, job) for job in jobs]
 
 
@@ -83,7 +83,7 @@ async def rerun(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    await start_jobs_background([new_job.id])
+    await start_or_defer_jobs(db, [new_job])
     return await to_job_detail_response(db, new_job)
 
 

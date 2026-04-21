@@ -2,6 +2,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    deploy_mode: str = "shared"
+
     # Database
     database_url: str = "postgresql+asyncpg://vp:vp_secret@localhost:5432/videoprocess"
 
@@ -23,15 +25,20 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     cors_origins: list[str] = ["*"]
-    exo_watchdog_url: str = "http://exo-watchdog.constructure-monitor.svc.cluster.local:8000"
+    exo_watchdog_url: str = "http://localhost:8000"
     platform_browser_manager_url: str = "http://localhost:8898"
+    x_platform_browser_manager_url: str = ""
+    bilibili_platform_browser_manager_url: str = ""
+    xiaohongshu_platform_browser_manager_url: str = ""
 
     # Shared retrieval services
-    embedding_gateway_url: str = "http://embedding-gateway.constructure-infra.svc.cluster.local:8080"
-    qdrant_url: str = "http://qdrant.constructure-infra.svc.cluster.local:6333"
+    embedding_gateway_url: str = "http://localhost:8080"
+    qdrant_url: str = "http://localhost:6333"
     material_qdrant_collection: str = "videoprocess_material_clips"
     material_lighthouse_url: str = ""
     material_univtg_url: str = ""
+
+    video_schedule_default_state: str = "OPEN"
 
     # Video worker features
     video_use_gpu: bool = False

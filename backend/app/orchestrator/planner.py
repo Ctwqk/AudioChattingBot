@@ -4,6 +4,7 @@ from app.schemas.pipeline import PipelineDefinition
 
 SEARCH_NODE_TYPES = {
     "youtube_search",
+    "x_search",
     "xiaohongshu_search",
     "bilibili_search",
     "material_search",

@@ -20,7 +20,7 @@ export type PlannerSearchResult = {
   confidence?: number | null;
 };
 
-const SEARCH_NODE_TYPES = new Set(['youtube_search', 'xiaohongshu_search', 'bilibili_search', 'material_search']);
+const SEARCH_NODE_TYPES = new Set(['youtube_search', 'x_search', 'xiaohongshu_search', 'bilibili_search', 'material_search']);
 const ZIP_NODE_TYPE = 'zip_records';
 const URL_DOWNLOAD_NODE_TYPE = 'url_download';
 const SOURCE_NODE_TYPE = 'source';

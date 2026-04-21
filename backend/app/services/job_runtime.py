@@ -8,14 +8,34 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.artifact import Artifact
+from app.models.job import Job
 from app.schemas.job import JobDetailResponse, JobResponse, NodeExecutionResponse
+from app.services.schedule_service import (
+    VideoScheduleState,
+    get_video_schedule_state,
+    park_jobs_for_window,
+)
 
 
 async def start_jobs_background(job_ids: Iterable[uuid.UUID]) -> None:
     from app.orchestrator.engine import engine
 
     for job_id in job_ids:
-        asyncio.create_task(engine.start_job(job_id))
+        asyncio.create_task(engine.start_job(uuid.UUID(str(job_id))))
+
+
+async def start_or_defer_jobs(db: AsyncSession, jobs: Iterable[Job]) -> VideoScheduleState:
+    materialized_jobs = list(jobs)
+    if not materialized_jobs:
+        return VideoScheduleState.OPEN
+
+    schedule_state = await get_video_schedule_state(db)
+    if schedule_state == VideoScheduleState.OPEN:
+        await start_jobs_background(job.id for job in materialized_jobs)
+        return schedule_state
+
+    await park_jobs_for_window(db, materialized_jobs)
+    return schedule_state
 
 
 def to_job_response(job) -> JobResponse:

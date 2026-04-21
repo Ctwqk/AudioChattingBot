@@ -10,10 +10,10 @@ import { buildPipelineDefinition } from '../../utils/pipelineDefinition';
 
 type PlannerNodeSearchResult = PlannerSearchResult;
 type SourceMediaKind = 'video' | 'audio' | 'subtitle' | 'image';
-type RemoteSearchNodeType = 'youtube_search' | 'xiaohongshu_search' | 'bilibili_search';
+type RemoteSearchNodeType = 'youtube_search' | 'x_search' | 'xiaohongshu_search' | 'bilibili_search';
 
 const REMOTE_SEARCH_NODE_CONFIG: Record<RemoteSearchNodeType, {
-  platform: 'youtube' | 'xiaohongshu' | 'bilibili';
+  platform: 'youtube' | 'x' | 'xiaohongshu' | 'bilibili';
   label: string;
   placeholder: string;
   description: string;
@@ -27,6 +27,14 @@ const REMOTE_SEARCH_NODE_CONFIG: Record<RemoteSearchNodeType, {
     description: 'Search YouTube, then select which videos this channel should contribute to batch records.',
     buttonLabel: 'Search YouTube',
     endpoint: '/youtube/api/search',
+  },
+  x_search: {
+    platform: 'x',
+    label: 'X',
+    placeholder: 'Search X posts',
+    description: 'Search X with the attached browser session, then select which posts should contribute to batch records.',
+    buttonLabel: 'Search X',
+    endpoint: '/platforms/api/platforms/x/search',
   },
   xiaohongshu_search: {
     platform: 'xiaohongshu',
@@ -761,7 +769,7 @@ function formatDuration(duration?: number | null) {
 }
 
 function isRemoteSearchNodeType(value: unknown): value is RemoteSearchNodeType {
-  return value === 'youtube_search' || value === 'xiaohongshu_search' || value === 'bilibili_search';
+  return value === 'youtube_search' || value === 'x_search' || value === 'xiaohongshu_search' || value === 'bilibili_search';
 }
 
 function ensurePlannerResultPlatform(

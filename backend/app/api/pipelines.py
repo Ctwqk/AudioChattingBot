@@ -14,7 +14,7 @@ from app.services.pipeline_service import (
     delete_pipeline, duplicate_pipeline, validate_definition,
 )
 from app.services.job_service import create_job
-from app.services.job_runtime import start_jobs_background, to_job_detail_response
+from app.services.job_runtime import start_or_defer_jobs, to_job_detail_response
 
 router = APIRouter(prefix="/api/v1", tags=["pipelines"])
 
@@ -126,7 +126,7 @@ async def execute_template(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    await start_jobs_background([job.id])
+    await start_or_defer_jobs(db, [job])
     return await to_job_detail_response(db, job)
 
 
@@ -142,5 +142,5 @@ async def execute_template_batch(
 
     jobs = await create_jobs_or_400(db, pipeline_id, data.items)
 
-    await start_jobs_background(job.id for job in jobs)
+    await start_or_defer_jobs(db, jobs)
     return [await to_job_detail_response(db, job) for job in jobs]

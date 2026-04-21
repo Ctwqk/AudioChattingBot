@@ -17,15 +17,35 @@ export default function Sidebar({
   onToggle: () => void;
 }) {
   const { authStatus, authLoading, authError, authInitialized, openYouTubeAuth } = useYouTubeAuth();
+  const xAuth = usePlatformAuth('x');
   const xiaohongshuAuth = usePlatformAuth('xiaohongshu');
   const bilibiliAuth = usePlatformAuth('bilibili');
   const navWidth = collapsed ? 72 : 200;
   const checking = !authInitialized && !authStatus && !authError;
+  const primaryButtonStyle = {
+    width: '100%',
+    border: 'none',
+    borderRadius: 8,
+    padding: '10px 12px',
+    color: '#fff',
+    fontSize: 13,
+  } as const;
 
+  const xChecking = !xAuth.authInitialized && !xAuth.authStatus && !xAuth.authError;
   const xiaohongshuChecking = !xiaohongshuAuth.authInitialized && !xiaohongshuAuth.authStatus && !xiaohongshuAuth.authError;
   const bilibiliChecking = !bilibiliAuth.authInitialized && !bilibiliAuth.authStatus && !bilibiliAuth.authError;
 
   const platformItems = [
+    {
+      key: 'x',
+      shortLabel: 'X',
+      label: 'X',
+      status: xAuth.authStatus,
+      loading: xAuth.authLoading,
+      error: xAuth.authError,
+      checking: xChecking,
+      openAuth: xAuth.openPlatformAuth,
+    },
     {
       key: 'xiaohongshu',
       shortLabel: 'XHS',
@@ -35,7 +55,6 @@ export default function Sidebar({
       error: xiaohongshuAuth.authError,
       checking: xiaohongshuChecking,
       openAuth: xiaohongshuAuth.openPlatformAuth,
-      logoutAuth: xiaohongshuAuth.logoutPlatformAuth,
     },
     {
       key: 'bilibili',
@@ -46,7 +65,6 @@ export default function Sidebar({
       error: bilibiliAuth.authError,
       checking: bilibiliChecking,
       openAuth: bilibiliAuth.openPlatformAuth,
-      logoutAuth: bilibiliAuth.logoutPlatformAuth,
     },
   ];
 
@@ -176,15 +194,10 @@ export default function Sidebar({
               onClick={() => void openYouTubeAuth()}
               disabled={authLoading}
               style={{
-                width: '100%',
-                border: 'none',
-                borderRadius: 8,
-                padding: '10px 12px',
                 backgroundColor: '#2563eb',
-                color: '#fff',
                 cursor: authLoading ? 'default' : 'pointer',
-                fontSize: 13,
                 opacity: authLoading ? 0.7 : 1,
+                ...primaryButtonStyle,
               }}
             >
               {authStatus?.authenticated ? 'Re-login YouTube' : 'Login YouTube'}
@@ -195,10 +208,7 @@ export default function Sidebar({
               </div>
             ) : null}
 
-            <div style={{ fontSize: 12, color: '#9aa4c7', marginTop: 16, marginBottom: 8 }}>
-              Platforms
-            </div>
-            <div style={{ display: 'grid', gap: 10 }}>
+            <div style={{ display: 'grid', gap: 14, marginTop: 16 }}>
               {platformItems.map(item => {
                 const unavailable = Boolean(item.error && !item.status);
                 const statusText = item.checking
@@ -217,10 +227,7 @@ export default function Sidebar({
                   <div
                     key={item.key}
                     style={{
-                      padding: 10,
-                      borderRadius: 10,
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      backgroundColor: 'rgba(255,255,255,0.03)',
+                      paddingTop: 2,
                     }}
                   >
                     <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 6 }}>
@@ -229,41 +236,19 @@ export default function Sidebar({
                     <div style={{ fontSize: 12, color: statusColor, marginBottom: 10 }}>
                       {statusText}
                     </div>
-                    <div style={{ display: 'flex', gap: 8 }}>
+                    <div style={{ display: 'grid', gap: 8 }}>
                       <button
                         type="button"
                         onClick={() => void item.openAuth()}
                         disabled={item.loading}
                         style={{
-                          flex: 1,
-                          border: 'none',
-                          borderRadius: 8,
-                          padding: '10px 12px',
                           backgroundColor: '#0f766e',
-                          color: '#fff',
                           cursor: item.loading ? 'default' : 'pointer',
-                          fontSize: 13,
                           opacity: item.loading ? 0.7 : 1,
+                          ...primaryButtonStyle,
                         }}
                       >
-                        {item.status?.authenticated ? 'Re-login' : 'Login'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void item.logoutAuth()}
-                        disabled={item.loading}
-                        style={{
-                          border: '1px solid rgba(255,255,255,0.14)',
-                          borderRadius: 8,
-                          padding: '10px 12px',
-                          backgroundColor: 'transparent',
-                          color: '#cbd5e1',
-                          cursor: item.loading ? 'default' : 'pointer',
-                          fontSize: 13,
-                          opacity: item.loading ? 0.7 : 1,
-                        }}
-                      >
-                        Logout
+                        {item.status?.authenticated ? `Re-login ${item.label}` : `Login ${item.label}`}
                       </button>
                     </div>
                     {item.error ? (

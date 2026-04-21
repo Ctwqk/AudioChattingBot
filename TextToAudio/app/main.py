@@ -24,6 +24,7 @@ USE_GPU = os.getenv("USE_GPU", "true").lower() in {"1", "true", "yes", "on"}
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/output")
 DEFAULT_SPEAKER_WAV = os.getenv("DEFAULT_SPEAKER_WAV", "")
 SPEAKER_CACHE_DIR = os.getenv("SPEAKER_CACHE_DIR", "/app/voicesource/cache")
+PRELOAD_ON_START = os.getenv("XTTS_PRELOAD_ON_START", "false").lower() in {"1", "true", "yes", "on"}
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(SPEAKER_CACHE_DIR, exist_ok=True)
@@ -252,6 +253,13 @@ def load_model() -> None:
         (os.environ.get("TTS_DEVICE", "auto") or "auto").strip().lower(),
         resolve_tts_device(),
     )
+    if PRELOAD_ON_START:
+        logger.info("Preloading XTTS engine during startup")
+        try:
+            get_xtts_engine()
+        except Exception:
+            logger.exception("XTTS preload failed during startup")
+            raise
 
 
 @app.get("/health", response_model=HealthResp)

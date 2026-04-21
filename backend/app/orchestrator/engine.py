@@ -19,6 +19,7 @@ from app.models.job import Job, JobStatus, NodeExecution, NodeStatus
 from app.node_registry.registry import NodeTypeRegistry
 from app.schemas.pipeline import PipelineDefinition
 from app.orchestrator.dag import topological_sort, build_dependency_map
+from app.services.schedule_service import get_video_schedule_state, park_job_for_window, should_defer_job_start
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,23 @@ class JobEngine:
             job = await db.get(Job, job_id, options=[selectinload(Job.node_executions)])
             if not job:
                 logger.error(f"Job {job_id} not found")
+                return
+            if job.status in {
+                JobStatus.SUCCEEDED,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+                JobStatus.PARTIALLY_FAILED,
+            }:
+                return
+
+            schedule_state = await get_video_schedule_state(db)
+            if should_defer_job_start(job, schedule_state):
+                await park_job_for_window(db, job)
+                logger.info(
+                    "Deferred job %s until next video window (state=%s)",
+                    job_id,
+                    schedule_state.value,
+                )
                 return
 
             try:
