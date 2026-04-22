@@ -12,7 +12,7 @@ Deploy the offloaded embedding/news stack to the Mac 3 service node.
 
 This is a repo-local implementation script.
 For normal cluster-wide deploys, prefer:
-  /home/taiwei/Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh news
+  /home/taiwei/k8s-Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh news
 
 Targets:
   mac3  Deploy embedding-gateway, news-server, and news-collector ($MAC3_TARGET)
@@ -45,7 +45,7 @@ install_news_stack() {
   local llm_base_url="${NEWS_LLM_BASE_URL:-http://$MAIN_HOST:$MAIN_WATCHDOG_PORT/v1}"
   local watchdog_url="${NEWS_WATCHDOG_URL:-http://$MAIN_HOST:$MAIN_WATCHDOG_PORT}"
   log_section "install_news_stack $target"
-  rsync_push "$CONSTRUCTURE_ROOT/embedding-gateway/" "$target" "~/Constructure/embedding-gateway/"
+  rsync_push "$INFRA_ROOT/embedding-gateway/" "$target" "~/Constructure/embedding-gateway/"
   rsync_push "$CONSTRUCTURE_ROOT/news/collector/" "$target" "~/Constructure/news/collector/"
   rsync_push "$CONSTRUCTURE_ROOT/news/server/" "$target" "~/Constructure/news/server/"
   rsync_push "$CONSTRUCTURE_ROOT/worldmonitor-hourly/config/" "$target" "~/Constructure/worldmonitor-hourly/config/"

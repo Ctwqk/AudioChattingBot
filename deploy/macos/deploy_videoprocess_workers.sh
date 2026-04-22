@@ -12,7 +12,7 @@ Deploy host-native VideoProcess workers to the remote Mac video nodes.
 
 This is a repo-local implementation script.
 For normal cluster-wide deploys, prefer:
-  /home/taiwei/Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh videoprocess
+  /home/taiwei/k8s-Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh videoprocess
 
 Targets:
   all   Deploy Mac 1 and Mac 2 workers

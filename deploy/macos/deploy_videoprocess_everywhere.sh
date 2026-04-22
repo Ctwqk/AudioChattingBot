@@ -22,7 +22,7 @@ Deploy VideoProcess worker code everywhere it currently runs:
 
 This is a repo-local convenience script.
 For normal cluster-wide deploys, prefer:
-  /home/taiwei/Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh videoprocess
+  /home/taiwei/k8s-Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh videoprocess
 
 Options:
   --workers <all|mac1|mac2>  Remote Mac worker target subset (default: all)

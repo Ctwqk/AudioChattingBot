@@ -4,7 +4,7 @@ This file is the fast-entry summary for agents working in `VideoProcess`.
 
 The canonical cluster-wide runtime document lives in:
 
-- [cluster-runtime-map.md](/home/taiwei/Constructure/k8s-constructure/cluster-runtime-map.md)
+- [cluster-runtime-map.md](/home/taiwei/k8s-Constructure/k8s-constructure/cluster-runtime-map.md)
 
 Use this file first when you need the short version.
 Jump to `cluster-runtime-map.md` when you need the full cluster picture.
@@ -259,8 +259,8 @@ K8s services
 
 Cluster-level deploy ownership:
 
-- [cluster-runtime-map.md](/home/taiwei/Constructure/k8s-constructure/cluster-runtime-map.md)
-- `/home/taiwei/Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh`
+- [cluster-runtime-map.md](/home/taiwei/k8s-Constructure/k8s-constructure/cluster-runtime-map.md)
+- `/home/taiwei/k8s-Constructure/k8s-constructure/scripts/deploy-offloaded-services.sh`
 
 Repo-local implementation details:
 
@@ -271,7 +271,7 @@ Repo-local implementation details:
 - [deploy_news_stack.sh](/home/taiwei/Constructure/VideoProcess/deploy/macos/deploy_news_stack.sh)
 - [offload_to_macs.sh](/home/taiwei/Constructure/VideoProcess/deploy/macos/offload_to_macs.sh)
 
-`offload_to_macs.sh` is now only a compatibility wrapper. Normal deploys should start from `k8s-constructure`.
+`offload_to_macs.sh` is now only a compatibility wrapper. Normal deploys should start from `~/k8s-Constructure/k8s-constructure`.
 
 ## Agent Rules Of Thumb
 
@@ -310,7 +310,7 @@ ssh magi1 '~/Constructure/services/embedding-gateway/status.sh'
 
 ### Cross-repo or cross-machine uncertainty
 
-1. Read [cluster-runtime-map.md](/home/taiwei/Constructure/k8s-constructure/cluster-runtime-map.md).
+1. Read [cluster-runtime-map.md](/home/taiwei/k8s-Constructure/k8s-constructure/cluster-runtime-map.md).
 2. Confirm whether the target is a K8s workload, a sidecar, or a host-native Mac process.
 3. Deploy from the owning repo and entrypoint, not from habit.
 
@@ -332,4 +332,4 @@ make smoke-test
 
 For cluster-wide placement, rollout order, and cross-repo deploy ownership, read:
 
-- [cluster-runtime-map.md](/home/taiwei/Constructure/k8s-constructure/cluster-runtime-map.md)
+- [cluster-runtime-map.md](/home/taiwei/k8s-Constructure/k8s-constructure/cluster-runtime-map.md)

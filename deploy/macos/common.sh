@@ -5,6 +5,21 @@ MACOS_DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VIDEO_PROCESS_ROOT="$(cd "$MACOS_DEPLOY_DIR/../.." && pwd)"
 CONSTRUCTURE_ROOT="$(cd "$VIDEO_PROCESS_ROOT/.." && pwd)"
 
+pick_first_existing_dir() {
+  local candidate
+  for candidate in "$@"; do
+    if [ -d "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "${*: -1}"
+}
+
+INFRA_ROOT="${INFRA_ROOT:-$(pick_first_existing_dir "$HOME/infra" "$CONSTRUCTURE_ROOT")}"
+K8S_HOME_ROOT="${K8S_HOME_ROOT:-$(pick_first_existing_dir "$HOME/k8s-Constructure" "$CONSTRUCTURE_ROOT")}"
+K8S_CONSTRUCTURE_ROOT="${K8S_CONSTRUCTURE_ROOT:-$(pick_first_existing_dir "$K8S_HOME_ROOT/k8s-constructure" "$CONSTRUCTURE_ROOT/k8s-constructure")}"
+
 SSH_KEY="${SSH_KEY:-/home/taiwei/.ssh/id_mini_wenjie}"
 KNOWN_HOSTS="${KNOWN_HOSTS:-/tmp/vp_mac_known_hosts}"
 MAIN_HOST="${MAIN_HOST:-192.168.20.4}"
