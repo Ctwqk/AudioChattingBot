@@ -48,11 +48,11 @@ install_news_stack() {
   rsync_push "$INFRA_ROOT/embedding-gateway/" "$target" "~/Constructure/embedding-gateway/"
   rsync_push "$CONSTRUCTURE_ROOT/news/collector/" "$target" "~/Constructure/news/collector/"
   rsync_push "$CONSTRUCTURE_ROOT/news/server/" "$target" "~/Constructure/news/server/"
-  rsync_push "$CONSTRUCTURE_ROOT/worldmonitor-hourly/config/" "$target" "~/Constructure/worldmonitor-hourly/config/"
+  rsync_push "$CONSTRUCTURE_ROOT/news/config/" "$target" "~/Constructure/news/config/"
   ssh_run "$target" "bash -lc '
     set -euo pipefail
     export PATH=\$HOME/.local/bin:\$PATH
-    mkdir -p ~/Constructure/services/embedding-gateway ~/Constructure/services/news-collector ~/Constructure/services/news-server
+    mkdir -p ~/Constructure/services/embedding-gateway ~/Constructure/services/news-collector ~/Constructure/services/news-server ~/Constructure/news/config
     cd ~/Constructure/embedding-gateway
     if [ ! -d .venv ]; then
       uv venv --python 3.12 .venv
@@ -92,7 +92,7 @@ EMBED_DEVICE=cpu
 EMBEDDING_GATEWAY_URL=http://127.0.0.1:8080
 LLM_BASE_URL=$llm_base_url
 EXO_WATCHDOG_URL=$watchdog_url
-FEED_URLS_FILE=\$HOME/Constructure/worldmonitor-hourly/config/feed-urls.txt
+FEED_URLS_FILE=\$HOME/Constructure/news/config/feed-urls.txt
 PATH=\$HOME/.local/bin:\$PATH
 EOF
     cat > ~/Constructure/services/news-server/env <<EOF
